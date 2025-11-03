@@ -11,102 +11,311 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #include <pthread.h>
-
-#include <cstring>
+#include <csignal>
+#include <cerrno>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <algorithm>
 #include <unordered_map>
+#include <atomic>
+#include "server.hpp"
 
-using namespace std;
+std::atomic<bool> server_running(true);
+std::unordered_map<std::string, User> users;
+pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
+std::vector<int> active_clients;
+pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-struct User {
-    string password;
-    int port = -1;
-    bool online = false;
-};
+int main(int argc, char **argv) {
+    /* Create a signal handler thread */
+    sigset_t signal_set;
+    sigemptyset(&signal_set);
+    sigaddset(&signal_set, SIGINT);   // Ctrl+C
+    sigaddset(&signal_set, SIGTERM);  // "kill" command
+    pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
+    pthread_t signal_handler_thread;
+    pthread_create(&signal_handler_thread, nullptr, handle_signal, &signal_set);
 
-unordered_map<string, User> users;
-pthread_mutex_t users_mtx = PTHREAD_MUTEX_INITIALIZER;
-
-static void send_line(int fd, const string &s) {
-    string line = s + "\n";
-    // TODO: Use send() to send 'line'
-}
-
-static bool recv_line(int fd, string &out) {
-    out.clear();
-    // TODO: implement recv() loop until '\n'
-    return true;
-}
-
-void* handle_client(void* arg) {
-    int fd = *(int*)arg;
-    delete (int*)arg; 
-
-    string line;
-    while (recv_line(fd, line)) {
-        istringstream iss(line);
-        string cmd; iss >> cmd;
-
-        if (cmd == "REGISTER") {
-            string id, pw; iss >> id >> pw;
-            pthread_mutex_lock(&users_mtx);
-            // TODO: implement REGISTER logic
-            pthread_mutex_unlock(&users_mtx);
-            // send_line(fd, response);
-        } 
-        else if (cmd == "LOGIN") {
-            string id, pw; int port; iss >> id >> pw >> port;
-            pthread_mutex_lock(&users_mtx);
-            // TODO: implement LOGIN logic
-            pthread_mutex_unlock(&users_mtx);
-            // send_line(fd, response);
-        } 
-        else if (cmd == "LOGOUT") {
-            string id; iss >> id;
-            pthread_mutex_lock(&users_mtx);
-            // TODO: implement LOGOUT logic
-            pthread_mutex_unlock(&users_mtx);
-            // send_line(fd, response);
-        } 
-        else if (cmd == "LIST") {
-            pthread_mutex_lock(&users_mtx);
-            // TODO: implement LIST logic
-            pthread_mutex_unlock(&users_mtx);
-            // send_line(fd, response);
-        } 
-        else {
-            send_line(fd, "ERROR UnknownCmd");
+    unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
+    Server server(port);
+    while (server_running) {
+        int client_fd = server.accept_conn();
+        if (client_fd < 0) {
+            std::cerr << "Failed to accept connection, continuing to accept next one..." << std::endl;
+            continue;
         }
+
+        /* Create a worker thread to handle the client */
+        pthread_t thread_id;
+        int *arg = new int(client_fd);
+        pthread_create(&thread_id, nullptr, handle_client, arg);
+        pthread_detach(thread_id);  // Detach thread to avoid memory leak
     }
 
+    pthread_join(signal_handler_thread, nullptr);
+    std::cout << "Server closed successfully." << std::endl;
+    return 0;
+}
+
+/* ========================
+   Server Implementation
+   ======================== */
+
+Server::Server(unsigned short p) : port(p), listen_fd(-1) {
+    /* Establish welcome socket */
+    if ((listen_fd = socket(AF_INET, SOCK_STREAM, 0)) < 0) // IPv4, TCP
+        err_exit("socket");
+
+    /* Set socket options (Avoid address reuse due to TIME WAIT) */
+    int opt = 1;
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        err_exit("setsockopt");
+
+    /* Set server address structure */
+    sockaddr_in listen_addr{};
+    listen_addr.sin_family = AF_INET; // IPv4
+    listen_addr.sin_addr.s_addr = inet_addr(LOCAL_HOST); // Listen on localhost
+    listen_addr.sin_port = htons(port);
+
+    /* Bind the socket */
+    if (bind(listen_fd, (sockaddr*)&listen_addr, sizeof(listen_addr)) < 0)
+        err_exit("bind");
+
+    /* Start listening (backlog = 10, meaning at most 10 waiting connections) */
+    if (listen(listen_fd, 10) < 0)
+        err_exit("listen");
+
+    std::cout << "Server initialized and listening on " << LOCAL_HOST << ":" << port << std::endl;
+}
+
+Server::~Server() {
+    if (listen_fd >= 0)
+        close(listen_fd);
+}
+
+int Server::accept_conn() {
+    sockaddr_in client_addr{};
+    socklen_t client_len = sizeof(client_addr);
+    int client_fd = accept(listen_fd, (sockaddr*)&client_addr, &client_len);
+    if (client_fd < 0)
+        return -1;
+
+    std::cout << "New client connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << std::endl;
+    return client_fd;
+}
+
+/* ===================================
+   ClientConnection Implementation
+   =================================== */
+
+ClientConnection::ClientConnection(int client_fd) : fd(client_fd) {
+    if (fd < 0) {
+        std::perror("Invalid client_fd in ClientConnection constructor");
+        pthread_exit(nullptr);
+    }
+        
+    pthread_mutex_lock(&clients_mutex);
+    active_clients.push_back(fd);
+    pthread_mutex_unlock(&clients_mutex);
+}
+
+ClientConnection::~ClientConnection() {
+    pthread_mutex_lock(&clients_mutex);
+    active_clients.erase(std::remove(active_clients.begin(), active_clients.end(), fd), active_clients.end());
+    pthread_mutex_unlock(&clients_mutex);
     close(fd);
+}
+
+void ClientConnection::handle_command(const std::string& command) {
+    std::istringstream iss(command);
+    std::string command_type;
+    iss >> command_type;
+    
+    switch (std::stoi(command_type)) {
+        case REGISTER: {
+            std::string name, password;
+            iss >> name >> password;
+            pthread_mutex_lock(&users_mutex);
+            if (users.find(name) != users.end()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR UserExists");
+            }
+            else {
+                User new_user;
+                new_user.password = password;
+                users[name] = new_user;
+                pthread_mutex_unlock(&users_mutex);
+                send_line("Register Success!");
+            }
+            break;
+        }
+        
+        case LOGIN: {
+            std::string name, password; 
+            unsigned short port;
+            iss >> name >> password >> port;
+            pthread_mutex_lock(&users_mutex);
+            if (users.find(name) == users.end()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR UserNotFound");
+            }
+            else if (users[name].password != password) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR WrongPassword");
+            }
+            else if (users[name].online) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR AlreadyOnline");
+            }
+            else {
+                users[name].online = true;
+                users[name].port = port;
+                pthread_mutex_unlock(&users_mutex);
+                send_line("Login Success!");
+            }
+            break;
+        }
+        
+        case LOGOUT: {
+            std::string name;
+            iss >> name;
+            pthread_mutex_lock(&users_mutex);
+            if (users.find(name) == users.end()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR UserNotFound");
+            }
+            else if (!users[name].online) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR NotOnline");
+            }
+            else {
+                users[name].online = false;
+                users[name].port = 0;
+                pthread_mutex_unlock(&users_mutex);
+                send_line("Logout Success!");
+            }
+            break;
+        }
+        
+        case LIST: {
+            pthread_mutex_lock(&users_mutex);
+            std::string response = "Online Users:";
+            for (const auto& pair : users) {
+                if (pair.second.online)
+                    response += " " + pair.first + " " + std::to_string(pair.second.port);
+            }
+            pthread_mutex_unlock(&users_mutex);
+            send_line(response);
+            break;
+        }
+        
+        default:
+            send_line("ERROR UnknownCommand");
+    }
+}
+
+void ClientConnection::send_line(const std::string& s) {
+    std::string line = s + "\n";
+    ssize_t total_sent = 0;
+    ssize_t len = line.length();
+    while (total_sent < len) {
+        ssize_t sent = send(fd, line.c_str() + total_sent, len - total_sent, 0);
+        if (sent <= 0) {
+            switch (errno) {
+                case EINTR: { // Interrupted by signal
+                    if (!server_running)
+                        return;
+                    continue;
+                }
+                case EAGAIN: // Send buffer full
+                #if EAGAIN != EWOULDBLOCK
+                case EWOULDBLOCK:
+                #endif
+                {
+                    usleep(1000);
+                    continue;
+                }
+                default: { // Other errors
+                    std::perror("send");
+                    pthread_exit(nullptr);
+                }
+            }
+        }
+        total_sent += sent;
+    }
+    return;
+}
+
+bool ClientConnection::recv_line(std::string& out) {
+    out.clear();
+    char c;
+    while (true) {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n < 0) {
+            switch (errno) {
+                case EINTR: {
+                    if (!server_running)
+                        return false;
+                    continue;
+                }
+                case EAGAIN:
+                #if EAGAIN != EWOULDBLOCK
+                case EWOULDBLOCK:
+                #endif
+                {
+                    usleep(1000);
+                    continue;
+                }
+                default: { // Other unexpected errors
+                    std::perror("recv");
+                    pthread_exit(nullptr);
+                }
+            }
+        }
+        else if (n == 0) // Connection closed by peer
+            return false;
+        
+        if (c == '\n')
+            return true;
+        out += c;
+    }
+}
+
+/* Thread functions */
+void* handle_client(void* arg) {
+    int client_fd = *(int*)arg;
+    delete (int*)arg;
+    
+    ClientConnection conn(client_fd);
+    std::string command;
+    while (server_running && conn.recv_line(command))
+        conn.handle_command(command);
+
     pthread_exit(nullptr);
 }
 
-int main(int argc, char **argv) {
-    int port = (argc >= 2) ? stoi(argv[1]) : 8888;
+void* handle_signal(void* arg) {
+    sigset_t* signal_set = (sigset_t*)arg;
+    int signal;    
+    
+    sigwait(signal_set, &signal);
+    
+    server_running = false;
+    std::cout << "Closing all client connections..." << std::endl;
+    pthread_mutex_lock(&clients_mutex);
+    for (int client_fd : active_clients)
+        shutdown(client_fd, SHUT_RD);  // Only close read side to interrupt recv(), but still allow send() to send last message
+    pthread_mutex_unlock(&clients_mutex);
+    
+    usleep(100000); // Wait for a short while to let client handlers finish
 
-    int listenfd;
-    sockaddr_in addr{};
-    /*
-    TODO:
-    1. Create a TCP socket 
-    2. Bind the socket to the given port
-    3. Start listening for connections
-    */
+    pthread_exit(nullptr);
+}
 
-    cout << "Server listening on 127.0.0.1:" << port << endl;
-
-    while (true) {
-        int cfd;
-        // TODO: accept connection using listenfd
-        // cfd = accept(listenfd, ...) 
-
-        pthread_t tid;
-        int *arg = new int(cfd);
-        pthread_create(&tid, nullptr, handle_client, arg);
-        pthread_detach(tid);
-    }
+/* Helper functions */
+inline void err_exit(const char *msg) {
+    std::perror(msg);
+    exit(EXIT_FAILURE);
 }
