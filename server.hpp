@@ -37,9 +37,8 @@ public:
     bool recv_line(std::string& out);
 };
 
-/* Thread functions */
-void* handle_client(void* arg);
-void* handle_signal(void* arg);
+/* Signal handler */
+void signal_handler(int sig);
 
 /* Helper functions */
 inline void err_exit(const char *msg);

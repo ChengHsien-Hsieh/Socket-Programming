@@ -12,7 +12,7 @@ class ServerConnection {
 private:
     int fd;
     std::string my_name;
-    bool quit_requested;
+    bool should_continue;
 
 public:
     ServerConnection(const std::string& server_ip, int server_port);
@@ -20,7 +20,7 @@ public:
     void handle_command(const std::string& command);
     void send_line(const std::string& message);
     bool recv_line(std::string& out);
-    bool continued() const { return !quit_requested; }
+    bool continued() const { return should_continue; }
 };
 
 /* Helper functions */

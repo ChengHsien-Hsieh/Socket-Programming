@@ -12,11 +12,11 @@ SERVER = server
 CLIENT = client
 
 # 原始檔案
-SERVER_SRC = server.cpp
+SERVER_SRC = server.cpp thread_pool.cpp
 CLIENT_SRC = client.cpp
 
 # 標頭檔案
-SERVER_HDR = server.hpp
+SERVER_HDR = server.hpp thread_pool.hpp
 CLIENT_HDR = client.hpp
 
 # 預設目標：編譯所有程式
@@ -33,10 +33,10 @@ $(CLIENT): $(CLIENT_SRC) $(CLIENT_HDR)
 	@echo "✅ Client compiled successfully!"
 
 # 只編譯 server
-server: $(SERVER)
+build-server: $(SERVER)
 
 # 只編譯 client
-client: $(CLIENT)
+build-client: $(CLIENT)
 
 # 清理編譯產生的檔案
 clean:

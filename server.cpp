@@ -21,6 +21,7 @@
 #include <unordered_map>
 #include <atomic>
 #include "server.hpp"
+#include "thread_pool.hpp"
 
 std::atomic<bool> server_running(true);
 std::unordered_map<std::string, User> users;
@@ -29,66 +30,50 @@ std::vector<int> active_clients;
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
-    /* Create a signal handler thread */
+    unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
+    Server server(port);
+
+    /* Block signals and then create worker threads */
     sigset_t signal_set;
     sigemptyset(&signal_set);
     sigaddset(&signal_set, SIGINT);   // Ctrl+C
     sigaddset(&signal_set, SIGTERM);  // "kill" command
     pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
-    pthread_t signal_handler_thread;
-    pthread_create(&signal_handler_thread, nullptr, handle_signal, &signal_set);
+    ThreadPool thread_pool(10);
 
-    unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
-    Server server(port);
+    /* Register signal handler and then unblock signals */
+    struct sigaction sa;
+    sa.sa_handler = signal_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+    pthread_sigmask(SIG_UNBLOCK, &signal_set, nullptr);
+    
     while (server_running) {
         int client_fd = server.accept_conn();
         if (client_fd < 0) {
             std::cerr << "Failed to accept connection, continuing to accept next one..." << std::endl;
             continue;
         }
-
-        /* Create a worker thread to handle the client */
-        pthread_t thread_id;
-        int *arg = new int(client_fd);
-        pthread_create(&thread_id, nullptr, handle_client, arg);
-        pthread_detach(thread_id);  // Detach thread to avoid memory leak
+        thread_pool.submit(client_fd);
     }
 
-    pthread_join(signal_handler_thread, nullptr);
+    thread_pool.stop();
+    for (int fd : active_clients)
+        shutdown(fd, SHUT_RD);
+
     std::cout << "Server closed successfully." << std::endl;
     return 0;
 }
 
-/* Thread functions */
-void* handle_client(void* arg) {
-    int client_fd = *(int*)arg;
-    delete (int*)arg;
-    
-    ClientConnection conn(client_fd);
-    std::string command;
-    while (server_running && conn.recv_line(command)) {
-        conn.handle_command(command);
-    }
-
-    pthread_exit(nullptr);
-}
-
-void* handle_signal(void* arg) {
-    sigset_t* signal_set = (sigset_t*)arg;
-    int signal;    
-    
-    sigwait(signal_set, &signal);
-    
+/* Signal handler */
+void signal_handler(int sig) {
+    if (sig == SIGINT)
+        write(STDERR_FILENO, "\nReceived SIGINT (Ctrl+C)\n", 26);
+    else if (sig == SIGTERM)
+        write(STDERR_FILENO, "\nReceived SIGTERM\n", 18);
     server_running = false;
-    std::cout << "Closing all client connections..." << std::endl;
-    pthread_mutex_lock(&clients_mutex);
-    for (int client_fd : active_clients)
-        shutdown(client_fd, SHUT_RD);  // Only close read side to interrupt recv(), but still allow send() to send last message
-    pthread_mutex_unlock(&clients_mutex);
-    
-    usleep(100000); // Wait for a short while to let client handlers finish
-
-    pthread_exit(nullptr);
 }
 
 /* Helper functions */
@@ -186,7 +171,11 @@ void ClientConnection::handle_command(const std::string& command) {
             std::string name, password;
             iss >> name >> password;
             pthread_mutex_lock(&users_mutex);
-            if (users.find(name) != users.end()) {
+            if (!logged_in_name.empty()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR YouHaveToLogoutFirst");
+            }
+            else if (users.find(name) != users.end()) {
                 pthread_mutex_unlock(&users_mutex);
                 send_line("ERROR UserExists");
             }
@@ -205,7 +194,11 @@ void ClientConnection::handle_command(const std::string& command) {
             unsigned short port;
             iss >> name >> password >> port;
             pthread_mutex_lock(&users_mutex);
-            if (users.find(name) == users.end()) {
+            if (!logged_in_name.empty()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR YouHaveToLogoutFirst");
+            }
+            else if (users.find(name) == users.end()) {
                 pthread_mutex_unlock(&users_mutex);
                 send_line("ERROR UserNotFound");
             }
@@ -251,6 +244,11 @@ void ClientConnection::handle_command(const std::string& command) {
         
         case LIST: {
             pthread_mutex_lock(&users_mutex);
+            if (logged_in_name.empty()) {
+                pthread_mutex_unlock(&users_mutex);
+                send_line("ERROR YouMustLoginFirst");
+                break;
+            }
             std::string response = "Online Users:";
             for (const auto& pair : users) {
                 if (pair.second.online)
@@ -324,7 +322,7 @@ bool ClientConnection::recv_line(std::string& out) {
                 }
             }
         }
-        else if (n == 0) // Connection closed by peer
+        else if (n == 0) // Connection should be closed or closed by peer
             return false;
         
         if (c == '\n')

@@ -28,6 +28,8 @@ int main(int argc, char **argv) {
             break;
         conn.handle_command(command);
     }
+
+    std::cout << "Connection closed by server." << std::endl;
     return 0;
 }
 
@@ -35,7 +37,7 @@ int main(int argc, char **argv) {
    ServerConnection Implementation
    =================================== */
 
-ServerConnection::ServerConnection(const std::string& server_ip, int server_port) : fd(-1), my_name(""), quit_requested(false) {
+ServerConnection::ServerConnection(const std::string& server_ip, int server_port) : fd(-1), my_name(""), should_continue(true) {
     /* Create connection socket */
     fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0)
@@ -95,11 +97,14 @@ void ServerConnection::handle_command(const std::string& command) {
             return;
         }
 
-        my_name = name;
         send_line(std::to_string(LOGIN) + " " + name + " " + password + " " + std::to_string(port));
         std::string respond;
-        if (recv_line(respond))
+        if (recv_line(respond)) {
             std::cout << respond << std::endl;
+            // Only set local state after server confirms login success
+            if (respond.rfind("Login Success!", 0) == 0) // starts with
+                my_name = name;
+        }
     }
     else if (command_type == "logout") {
         if (my_name.empty()) {
@@ -119,10 +124,13 @@ void ServerConnection::handle_command(const std::string& command) {
     }
     else if (command_type == "quit") {
         std::cout << "Goodbye!\n";
-        quit_requested = true;
-    }
+        should_continue = false;
+    }   
     else if (!command_type.empty()) {
-        std::cout << "Unknown command\n";
+        send_line(std::to_string(UNKNOWN));
+        std::string respond;
+        if (recv_line(respond))
+            std::cout << respond << std::endl;
     }
 }
 
@@ -134,16 +142,26 @@ void ServerConnection::send_line(const std::string& s) {
         ssize_t sent = send(fd, line.c_str() + total_sent, len - total_sent, 0);
         if (sent <= 0) {
             switch (errno) {
-                case EINTR:
+                case EINTR: {
                     continue;
+                }
                 case EAGAIN:
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
+                {
                     usleep(1000);  // Wait 1ms
                     continue;
-                default:
+                }
+                case EPIPE:
+                case ECONNRESET:
+                {
+                    should_continue = false;
+                    return;  // ← 改用 return
+                }
+                default: {
                     err_exit("send");
+                }
             }
         }
         total_sent += sent;
@@ -158,20 +176,30 @@ bool ServerConnection::recv_line(std::string& out) {
         ssize_t n = recv(fd, &c, 1, 0);
         if (n < 0) {
             switch (errno) {
-                case EINTR:
+                case EINTR: {
                     continue;
+                }
                 case EAGAIN:
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
+                {
                     usleep(1000);  // Wait 1ms
                     continue;
-                default:
+                }
+                case ECONNRESET: {
+                    should_continue = false;
+                    return false;  // ← 改用 return
+                }
+                default: {
                     err_exit("recv");
+                }
             }
         }
-        else if (n == 0) // Connection closed by server
+        else if (n == 0) { // Connection closed by server
+            should_continue = false;
             return false;
+        }
         
         if (c == '\n')
             return true;
