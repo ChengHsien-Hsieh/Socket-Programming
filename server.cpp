@@ -59,6 +59,44 @@ int main(int argc, char **argv) {
     return 0;
 }
 
+/* Thread functions */
+void* handle_client(void* arg) {
+    int client_fd = *(int*)arg;
+    delete (int*)arg;
+    
+    ClientConnection conn(client_fd);
+    std::string command;
+    while (server_running && conn.recv_line(command)) {
+        conn.handle_command(command);
+    }
+
+    pthread_exit(nullptr);
+}
+
+void* handle_signal(void* arg) {
+    sigset_t* signal_set = (sigset_t*)arg;
+    int signal;    
+    
+    sigwait(signal_set, &signal);
+    
+    server_running = false;
+    std::cout << "Closing all client connections..." << std::endl;
+    pthread_mutex_lock(&clients_mutex);
+    for (int client_fd : active_clients)
+        shutdown(client_fd, SHUT_RD);  // Only close read side to interrupt recv(), but still allow send() to send last message
+    pthread_mutex_unlock(&clients_mutex);
+    
+    usleep(100000); // Wait for a short while to let client handlers finish
+
+    pthread_exit(nullptr);
+}
+
+/* Helper functions */
+inline void err_exit(const char *msg) {
+    std::perror(msg);
+    exit(EXIT_FAILURE);
+}
+
 /* ========================
    Server Implementation
    ======================== */
@@ -110,7 +148,7 @@ int Server::accept_conn() {
    ClientConnection Implementation
    =================================== */
 
-ClientConnection::ClientConnection(int client_fd) : fd(client_fd) {
+ClientConnection::ClientConnection(int client_fd) : fd(client_fd), logged_in_name("") {
     if (fd < 0) {
         std::perror("Invalid client_fd in ClientConnection constructor");
         pthread_exit(nullptr);
@@ -125,6 +163,16 @@ ClientConnection::~ClientConnection() {
     pthread_mutex_lock(&clients_mutex);
     active_clients.erase(std::remove(active_clients.begin(), active_clients.end(), fd), active_clients.end());
     pthread_mutex_unlock(&clients_mutex);
+
+    if (!logged_in_name.empty()) {
+        pthread_mutex_lock(&users_mutex);
+        if (users.find(logged_in_name) != users.end()) {
+            users[logged_in_name].online = false;
+            users[logged_in_name].port = 0;
+        }
+        pthread_mutex_unlock(&users_mutex);
+    }
+
     close(fd);
 }
 
@@ -173,6 +221,7 @@ void ClientConnection::handle_command(const std::string& command) {
                 users[name].online = true;
                 users[name].port = port;
                 pthread_mutex_unlock(&users_mutex);
+                logged_in_name = name;
                 send_line("Login Success!");
             }
             break;
@@ -194,6 +243,7 @@ void ClientConnection::handle_command(const std::string& command) {
                 users[name].online = false;
                 users[name].port = 0;
                 pthread_mutex_unlock(&users_mutex);
+                logged_in_name = "";
                 send_line("Logout Success!");
             }
             break;
@@ -281,41 +331,4 @@ bool ClientConnection::recv_line(std::string& out) {
             return true;
         out += c;
     }
-}
-
-/* Thread functions */
-void* handle_client(void* arg) {
-    int client_fd = *(int*)arg;
-    delete (int*)arg;
-    
-    ClientConnection conn(client_fd);
-    std::string command;
-    while (server_running && conn.recv_line(command))
-        conn.handle_command(command);
-
-    pthread_exit(nullptr);
-}
-
-void* handle_signal(void* arg) {
-    sigset_t* signal_set = (sigset_t*)arg;
-    int signal;    
-    
-    sigwait(signal_set, &signal);
-    
-    server_running = false;
-    std::cout << "Closing all client connections..." << std::endl;
-    pthread_mutex_lock(&clients_mutex);
-    for (int client_fd : active_clients)
-        shutdown(client_fd, SHUT_RD);  // Only close read side to interrupt recv(), but still allow send() to send last message
-    pthread_mutex_unlock(&clients_mutex);
-    
-    usleep(100000); // Wait for a short while to let client handlers finish
-
-    pthread_exit(nullptr);
-}
-
-/* Helper functions */
-inline void err_exit(const char *msg) {
-    std::perror(msg);
-    exit(EXIT_FAILURE);
 }

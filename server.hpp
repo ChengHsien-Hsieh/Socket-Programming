@@ -27,6 +27,7 @@ public:
 class ClientConnection {
 private:
     int fd;
+    std::string logged_in_name;
 
 public:
     explicit ClientConnection(int client_fd);
