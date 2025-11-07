@@ -1,5 +1,4 @@
 #pragma once
-
 #include <string>
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -16,18 +15,21 @@ struct User {
 class Server {
 private:
     unsigned short port;
-    int listen_fd;
-    
+    int listen_fd = -1;
+    void ERR_EXIT(const char *msg);
+
 public:
     Server(unsigned short p);
-    ~Server();
+    ~Server();    
     int accept_conn();
+    void close_server();
 };
 
 class ClientConnection {
 private:
     int fd;
-    std::string logged_in_name;
+    std::string logged_in_name = "";
+    void ERR_EXIT(const char *msg);
 
 public:
     explicit ClientConnection(int client_fd);
@@ -35,10 +37,11 @@ public:
     void handle_command(const std::string& command);
     void send_line(const std::string& message);
     bool recv_line(std::string& out);
+    void disconnect();
 };
 
 /* Signal handler */
 void signal_handler(int sig);
 
-/* Helper functions */
-inline void err_exit(const char *msg);
+/* Worker thread function */
+void handle_client(int client_fd, std::atomic<bool>* shutdown_flag);

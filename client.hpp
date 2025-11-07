@@ -1,5 +1,4 @@
 #pragma once
-
 #include <string>
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
@@ -13,6 +12,8 @@ private:
     int fd;
     std::string my_name;
     bool should_continue;
+    int listen_fd;  // P2P listening socket
+    int listen_port;  // Port number for P2P
 
 public:
     ServerConnection(const std::string& server_ip, int server_port);
@@ -21,6 +22,10 @@ public:
     void send_line(const std::string& message);
     bool recv_line(std::string& out);
     bool continued() const { return should_continue; }
+    
+private:
+    bool create_listening_socket(int port);  // Create and bind listening socket
+    void close_listening_socket();           // Close listening socket
 };
 
 /* Helper functions */

@@ -1,28 +1,26 @@
-// thread_pool.hpp
 #pragma once
 #include <pthread.h>
 #include <queue>
 #include <atomic>
 
-// Forward declaration of global variable from server.cpp
-// extern std::atomic<bool> server_running;
+typedef void (*TaskHandler)(int client_fd, std::atomic<bool>* shutdown_flag);
 
 class ThreadPool {
 private:
-    std::queue<int> task_queue;       // 待處理的 client_fd
-    pthread_mutex_t queue_mutex;      // 保護 queue
-    pthread_cond_t queue_cond;        // 條件變數：通知有新任務
-    
-    pthread_t* workers;               // Worker threads 陣列
-    int pool_size;                    // Pool 大小
-    bool shutdown;                    // 是否正在關閉
-    
-    static void* worker_thread(void* arg);  // Worker 函數
+    std::atomic<bool> stop = false;
+    int pool_size;
+    pthread_t* workers;
+    TaskHandler task_handler;
+    static void* worker_thread(void* arg);
+
+    std::queue<int> client_fds;
+    pthread_mutex_t client_fds_mutex;
+    pthread_cond_t client_fds_cond;
     
 public:
-    ThreadPool(int size);
+    ThreadPool(int size, TaskHandler handler);
     ~ThreadPool();
-    
-    void submit(int client_fd);       // 提交任務
-    void stop();                      // 停止 pool
+
+    void submit(int client_fd);
+    void shutdown();
 };
