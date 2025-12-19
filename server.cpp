@@ -22,16 +22,6 @@ std::unordered_map<std::string, User> users;
 pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
 std::vector<int> conn_fds;
 pthread_mutex_t conn_fds_mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_mutex_t cout_mutex = PTHREAD_MUTEX_INITIALIZER;
-
-/* Thread-safe cout wrapper */
-template<typename... Args>
-void safe_cout(Args&&... args) {
-    pthread_mutex_lock(&cout_mutex);
-    (std::cout << ... << args);  // C++17 fold expression
-    std::cout << std::endl;
-    pthread_mutex_unlock(&cout_mutex);
-}
 
 int main(int argc, char **argv) {
     unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
@@ -65,7 +55,7 @@ int main(int argc, char **argv) {
     for (int fd : conn_fds)
         shutdown(fd, SHUT_RD); // Close connection blocked in "recv" by client
     
-    safe_cout("Server closed successfully.");
+    std::cout << "Server closed successfully." << std::endl;
     return 0;
 }
 
@@ -82,8 +72,6 @@ void handle_client(int client_fd, std::atomic<bool>* shutdown_flag) {
     std::string command;
     while (conn.recv_line(command) && !(*shutdown_flag))
         conn.handle_command(command);
-    
-    safe_cout("Connection closed for fd ", client_fd);
 }
 
 /* ========================
@@ -114,7 +102,7 @@ Server::Server(unsigned short p) : port(p) {
     if (listen(listen_fd, 10) < 0)
         ERR_EXIT("listen");
 
-    safe_cout("Server initialized and listening on ", LOCAL_HOST, ":", port);
+    std::cout << "Server initialized and listening on " << LOCAL_HOST << ":" << port << std::endl;
 }
 
 Server::~Server() {
@@ -122,7 +110,7 @@ Server::~Server() {
 }
 
 void Server::ERR_EXIT(const char *msg) {
-    std::perror(msg);
+    throw (errno == 0) ? std::runtime_error(msg) : std::runtime_error(std::string(msg) + ": " + strerror(errno));
     close_server();
     exit(EXIT_FAILURE);
 }
@@ -159,7 +147,7 @@ int Server::accept_conn() {
         }
     }
 
-    safe_cout("New client connected from ", inet_ntoa(client_addr.sin_addr), ":", ntohs(client_addr.sin_port));
+    std::cout << "New client connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << std::endl;
     return client_fd;
 }
 
@@ -168,7 +156,6 @@ void Server::close_server() {
         close(listen_fd);
     pthread_mutex_destroy(&users_mutex);
     pthread_mutex_destroy(&conn_fds_mutex);
-    pthread_mutex_destroy(&cout_mutex);
 }
 
 /* ===================================
@@ -278,11 +265,11 @@ void ClientConnection::send_line(const std::string& s) {
             switch (errno) {
                 case EINTR: // Interrupted by signal, retry
                     continue;
-                case EAGAIN:     // Send buffer full (non-blocking)
+                case EAGAIN: // Send buffer full (non-blocking)
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
-                    usleep(1000);  // Wait for 1ms
+                    usleep(1000); // Wait for 1ms
                     continue;
                 default:
                     ERR_EXIT("send");
@@ -302,11 +289,11 @@ bool ClientConnection::recv_line(std::string& out) {
             switch (errno) {
                 case EINTR: // Interrupted by signal, retry
                     continue;
-                case EAGAIN:     // No data available (non-blocking)
+                case EAGAIN: // No data available (non-blocking)
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
-                    usleep(1000);  // Wait for 1ms
+                    usleep(1000); // Wait for 1ms
                     continue;
                 default:
                     ERR_EXIT("recv");

@@ -1,5 +1,8 @@
 #pragma once
 #include <string>
+#include <pthread.h>
+#include <iostream>
+#include <atomic>
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define LOCAL_HOST "127.0.0.1"
