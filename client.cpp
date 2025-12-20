@@ -42,10 +42,10 @@ int main(int argc, char **argv) {
    ServerConnection Implementation
    =================================== */
 
-ServerConnection::ServerConnection(const std::string& server_ip, int server_port) : fd(-1), my_name(""), should_continue(true), listen_fd(-1), listen_port(0) {
+ServerConnection::ServerConnection(const std::string& server_ip, int server_port) : server_fd(-1), my_name(""), should_continue(true), listen_fd(-1), listen_port(0) {
     /* Create connection socket */
-    fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
+    server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0)
         ERR_EXIT("socket");
 
     /* Set up server address */
@@ -55,21 +55,54 @@ ServerConnection::ServerConnection(const std::string& server_ip, int server_port
     server_addr.sin_port = htons(server_port);
 
     /* Connect to server */
-    if (connect(fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
-        close(fd);
+    if (connect(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
         ERR_EXIT("connect");
-    }
     
     UI::print_success("Connected to server at " + server_ip + ":" + std::to_string(server_port));
 }
 
 ServerConnection::~ServerConnection() {
-    close_listening_socket();  // Close P2P listening socket if open
-    if (fd >= 0)
-        close(fd);
+    if (server_fd >= 0)
+        close(server_fd);
+    if (listen_fd >= 0)
+        close_listening_socket();
+}
+
+bool ServerConnection::create_listening_socket(int port) {
+    /* Create listening socket */
+    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listen_fd < 0)
+        ERR_EXIT("socket");
+    
+    /* Set socket options (Avoid address reuse due to TIME WAIT) */
+    int opt = 1;
+    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+        ERR_EXIT("setsockopt");
+    
+    /* Set address structure */
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = INADDR_ANY;  // Listen on all interfaces
+    addr.sin_port = htons(port);
+    
+    /* Bind to the port */
+    if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
+        close(listen_fd);
+        listen_fd = -1;
+        return false;
+    }
+    
+    /* Start listening */
+    if (listen(listen_fd, 5) < 0)
+        ERR_EXIT("listen");
+    
+    listen_port = port;
+    UI::print_local_message("P2P listening socket created on port " + std::to_string(port));
+    return true;
 }
 
 void ServerConnection::handle_command(const std::string& command) {
+    std::string error_msgs[] = {"User already exists", "User not found", "Wrong password", "User already online", "User not online", "You must login first", "You must logout first", "Unknown command"};
     std::istringstream iss(command);
     std::string command_type;
     iss >> command_type;
@@ -84,12 +117,16 @@ void ServerConnection::handle_command(const std::string& command) {
         send_line(std::to_string(REGISTER) + " " + name + " " + password);
         std::string respond;
         if (recv_line(respond)) {
-            if (respond.rfind("Register Success!", 0) == 0)
-                UI::print_success(respond);
-            else if (respond.rfind("ERROR", 0) == 0)
-                UI::print_error(respond.substr(6)); // Remove "ERROR " prefix
-            else
-                UI::print_server_message(respond);
+            std::istringstream iss(respond);
+            int response_code;
+            iss >> response_code;
+            if (response_code == SUCCESS)
+                UI::print_success("Register Success!");
+            else {
+                int error_code;
+                iss >> error_code;
+                UI::print_error(error_msgs[error_code]);
+            }
         }
     }
     else if (command_type == "login") {
@@ -109,19 +146,20 @@ void ServerConnection::handle_command(const std::string& command) {
                 UI::print_error("Port must be a valid number");
                 return;
             }
-        }
-        catch (const std::exception&) {
+        } catch (const std::exception&) {
             UI::print_error("Port must be a valid number");
             return;
         }
 
-        // Check port range
+        /* Check port range */
         if (port < 1024 || port > 65535) {
             UI::print_error("Port must be between 1024 and 65535");
             return;
         }
-        
-        // Try to create listening socket on the specified port
+
+        /* Try to create listening socket on the specified port */
+        if (listen_fd >= 0)
+            close_listening_socket();
         if (!create_listening_socket(port)) {
             UI::print_error("Port " + std::to_string(port) + " is not available (already in use or permission denied)");
             return;
@@ -130,15 +168,18 @@ void ServerConnection::handle_command(const std::string& command) {
         send_line(std::to_string(LOGIN) + " " + name + " " + password + " " + port_str);
         std::string respond;
         if (recv_line(respond)) {
-            if (respond.rfind("Login Success!", 0) == 0) {
-                UI::print_success(respond);
-                my_name = name;  // Only set local state after server confirms login success
-            } else {
-                if (respond.rfind("ERROR", 0) == 0)
-                    UI::print_error(respond.substr(6)); // Remove "ERROR " prefix
-                else
-                    UI::print_server_message(respond);
-                close_listening_socket(); // Close listening socket if login failed
+            std::istringstream iss(respond);
+            int response_code;
+            iss >> response_code;
+            if (response_code == SUCCESS) {
+                UI::print_success("Login Success!");
+                my_name = name;
+            }
+            else {
+                int error_code;
+                iss >> error_code;
+                UI::print_error(error_msgs[error_code]);
+                close_listening_socket();
             }
         }
     }
@@ -150,15 +191,18 @@ void ServerConnection::handle_command(const std::string& command) {
         send_line(std::to_string(LOGOUT) + " " + my_name);
         std::string respond;
         if (recv_line(respond)) {
-            if (respond.rfind("Logout Success!", 0) == 0) {
-                UI::print_success(respond);
+            std::istringstream iss(respond);
+            int response_code;
+            iss >> response_code;
+            if (response_code == SUCCESS) {
+                UI::print_success("Logout Success!");
                 close_listening_socket();
                 my_name.clear();
-            } else {
-                if (respond.rfind("ERROR", 0) == 0)
-                    UI::print_error(respond.substr(6)); // Remove "ERROR " prefix
-                else
-                    UI::print_server_message(respond);
+            }
+            else {
+                int error_code;
+                iss >> error_code;
+                UI::print_error(error_msgs[error_code]);
             }
         }
     }
@@ -166,10 +210,22 @@ void ServerConnection::handle_command(const std::string& command) {
         send_line(std::to_string(LIST));
         std::string respond;
         if (recv_line(respond)) {
-            if (respond.rfind("ERROR", 0) == 0)
-                UI::print_error(respond.substr(6)); // Remove "ERROR " prefix
-            else
-                UI::print_server_message(respond);
+            std::istringstream iss(respond);
+            int response_code;
+            iss >> response_code;
+            if (response_code == SUCCESS) {
+                std::string name;
+                int port;
+                std::string output = "Online Users:";
+                while (iss >> name >> port)
+                    output += " " + name + "-" + std::to_string(port);
+                UI::print_server_message(output);
+            }
+            else {
+                int error_code;
+                iss >> error_code;
+                UI::print_error(error_msgs[error_code]);
+            }
         }
     }
     else if (command_type == "quit") {
@@ -179,8 +235,16 @@ void ServerConnection::handle_command(const std::string& command) {
     else if (!command_type.empty()) {
         send_line(std::to_string(UNKNOWN));
         std::string respond;
-        if (recv_line(respond))
-            UI::print_server_message(respond);
+        if (recv_line(respond)) {
+            std::istringstream iss(respond);
+            int response_code;
+            iss >> response_code;
+            if (response_code == ERROR) {
+                int error_code;
+                iss >> error_code;
+                UI::print_error(error_msgs[error_code]);
+            }
+        }
     }
 }
 
@@ -189,29 +253,23 @@ void ServerConnection::send_line(const std::string& s) {
     ssize_t total_sent = 0;
     ssize_t len = line.length();
     while (total_sent < len) {
-        ssize_t sent = send(fd, line.c_str() + total_sent, len - total_sent, 0);
+        ssize_t sent = send(server_fd, line.c_str() + total_sent, len - total_sent, 0);
         if (sent <= 0) {
             switch (errno) {
-                case EINTR: {
+                case EINTR:
                     continue;
-                }
                 case EAGAIN:
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
-                {
                     usleep(1000);  // Wait 1ms
                     continue;
-                }
                 case EPIPE:
                 case ECONNRESET:
-                {
                     should_continue = false;
-                    return;  // ← 改用 return
-                }
-                default: {
+                    return;
+                default:
                     ERR_EXIT("send");
-                }
             }
         }
         total_sent += sent;
@@ -223,27 +281,22 @@ bool ServerConnection::recv_line(std::string& out) {
     out.clear();
     char c;
     while (true) {
-        ssize_t n = recv(fd, &c, 1, 0);
+        ssize_t n = recv(server_fd, &c, 1, 0);
         if (n < 0) {
             switch (errno) {
-                case EINTR: {
+                case EINTR:
                     continue;
-                }
                 case EAGAIN:
                 #if EAGAIN != EWOULDBLOCK
                 case EWOULDBLOCK:
                 #endif
-                {
                     usleep(1000);  // Wait 1ms
                     continue;
-                }
-                case ECONNRESET: {
+                case ECONNRESET:
                     should_continue = false;
                     return false;
-                }
-                default: {
+                default:
                     ERR_EXIT("recv");
-                }
             }
         }
         else if (n == 0) { // Connection closed by server
@@ -257,65 +310,18 @@ bool ServerConnection::recv_line(std::string& out) {
     }
 }
 
-bool ServerConnection::create_listening_socket(int port) {
-    // If there's already a listening socket, close it first
-    close_listening_socket();
-    
-    // Create listening socket
-    listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (listen_fd < 0) {
-        std::cerr << "Failed to create listening socket: " << strerror(errno) << std::endl;
-        return false;
-    }
-    
-    // Set SO_REUSEADDR to allow quick restart
-    int opt = 1;
-    if (setsockopt(listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
-        std::cerr << "Failed to set SO_REUSEADDR: " << strerror(errno) << std::endl;
-        close(listen_fd);
-        listen_fd = -1;
-        return false;
-    }
-    
-    // Bind to the port
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;  // Listen on all interfaces
-    addr.sin_port = htons(port);
-    
-    if (bind(listen_fd, (sockaddr*)&addr, sizeof(addr)) < 0) {
-        std::cerr << "Failed to bind to port " << port << ": " << strerror(errno) << std::endl;
-        close(listen_fd);
-        listen_fd = -1;
-        return false;
-    }
-    
-    // Start listening
-    if (listen(listen_fd, 5) < 0) {
-        std::cerr << "Failed to listen on port " << port << ": " << strerror(errno) << std::endl;
-        close(listen_fd);
-        listen_fd = -1;
-        return false;
-    }
-    
-    listen_port = port;
-    UI::print_local_message("P2P listening socket created on port " + std::to_string(port));
-    return true;
-}
-
 void ServerConnection::close_listening_socket() {
-    if (listen_fd >= 0) {
-        UI::print_local_message("Closing P2P listening socket on port " + std::to_string(listen_port));
-        close(listen_fd);
-        listen_fd = -1;
-        listen_port = 0;
-    }
+    UI::print_local_message("Closing P2P listening socket on port " + std::to_string(listen_port));
+    close(listen_fd);
+    listen_fd = -1;
+    listen_port = 0;
 }
 
 void ServerConnection::ERR_EXIT(const char *msg) {
     std::perror(msg);
-    close_listening_socket();
-    if (fd >= 0)
-        close(fd);
+    if (server_fd >= 0)
+        close(server_fd);
+    if (listen_fd >= 0)
+        close_listening_socket();
     exit(EXIT_FAILURE);
 }

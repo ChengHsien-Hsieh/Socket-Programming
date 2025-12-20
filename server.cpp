@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
     sigaction(SIGTERM, &sa, nullptr);
     pthread_sigmask(SIG_UNBLOCK, &signal_set, nullptr);
 
+    /* Print server ready message */
     UI::print_line();
     UI::print_server_status("Server is ready and waiting for connections...");
     UI::print_line();
@@ -198,14 +199,14 @@ void ClientConnection::handle_command(const std::string& command) {
             std::string name, password;
             iss >> name >> password;
             if (!logged_in_name.empty())
-                response = "ERROR YouHaveToLogoutFirst";
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGOUT_FIRST);
             else if (users.find(name) != users.end())
-                response = "ERROR UserExists";
+                response = std::to_string(ERROR) + " " + std::to_string(USER_EXISTS);
             else {
                 User new_user;
                 new_user.password = password;
                 users[name] = new_user;
-                response = "Register Success!";
+                response = std::to_string(SUCCESS);
             }
             break;
         }
@@ -214,18 +215,18 @@ void ClientConnection::handle_command(const std::string& command) {
             unsigned short port;
             iss >> name >> password >> port;
             if (!logged_in_name.empty())
-                response = "ERROR YouHaveToLogoutFirst";
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGOUT_FIRST);
             else if (users.find(name) == users.end())
-                response = "ERROR UserNotFound";
+                response = std::to_string(ERROR) + " " + std::to_string(USER_NOT_FOUND);
             else if (users[name].password != password)
-                response = "ERROR WrongPassword";
+                response = std::to_string(ERROR) + " " + std::to_string(WRONG_PASSWORD);
             else if (users[name].online)
-                response = "ERROR AlreadyOnline";
+                response = std::to_string(ERROR) + " " + std::to_string(ALREADY_ONLINE);
             else {
                 users[name].online = true;
                 users[name].port = port;
                 logged_in_name = name;
-                response = "Login Success!";
+                response = std::to_string(SUCCESS);
             }
             break;
         }
@@ -233,23 +234,23 @@ void ClientConnection::handle_command(const std::string& command) {
             std::string name;
             iss >> name;
             if (users.find(name) == users.end())
-                response = "ERROR UserNotFound";
+                response = std::to_string(ERROR) + " " + std::to_string(USER_NOT_FOUND);
             else if (!users[name].online)
-                response = "ERROR NotOnline";
+                response = std::to_string(ERROR) + " " + std::to_string(NOT_ONLINE);
             else {
                 users[name].online = false;
                 users[name].port = 0;
                 logged_in_name.clear();
-                response = "Logout Success!";
+                response = std::to_string(SUCCESS);
             }
             break;
         }
         case LIST: {
             if (logged_in_name.empty()) {
-                response = "ERROR YouMustLoginFirst";
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
                 break;
             }
-            response = "Online Users:";
+            response = std::to_string(SUCCESS);
             for (const auto& pair : users) {
                 if (pair.second.online)
                     response += " " + pair.first + " " + std::to_string(pair.second.port);
@@ -257,7 +258,7 @@ void ClientConnection::handle_command(const std::string& command) {
             break;
         }
         default:
-            response = "ERROR UnknownCommand";
+            response = std::to_string(ERROR) + " " + std::to_string(UNKNOWN_COMMAND);
     }
     pthread_mutex_unlock(&users_mutex);
     send_line(response);

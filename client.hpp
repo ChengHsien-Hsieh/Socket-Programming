@@ -5,11 +5,13 @@
 #define LOCAL_HOST "127.0.0.1"
 #define DEFAULT_PORT 8888
 enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, UNKNOWN};
+enum ResponseCode {SUCCESS, ERROR};
+enum ErrorCode {USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, MUST_LOGOUT_FIRST, UNKNOWN_COMMAND};
 
 /* ServerConnection class for RAII socket management */
 class ServerConnection {
 private:
-    int fd;
+    int server_fd;
     std::string my_name;
     bool should_continue;
     int listen_fd;  // P2P listening socket
