@@ -7,6 +7,7 @@
 #define EXIT_FAILURE 1
 #define LOCAL_HOST "127.0.0.1"
 #define DEFAULT_PORT 8888
+#define NUM_THREADS 10
 enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, UNKNOWN};
 
 struct User {

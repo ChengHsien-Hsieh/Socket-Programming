@@ -26,7 +26,5 @@ public:
 private:
     bool create_listening_socket(int port);  // Create and bind listening socket
     void close_listening_socket();           // Close listening socket
+    void ERR_EXIT(const char *msg);          // Error exit with cleanup
 };
-
-/* Helper functions */
-inline void err_exit(const char *msg);

@@ -1,5 +1,6 @@
 // thread_pool.cpp
 #include "thread_pool.hpp"
+#include "ui_utils.hpp"
 #include <unistd.h>
 #include <iostream>
 
@@ -15,7 +16,7 @@ ThreadPool::ThreadPool(int size, TaskHandler handler) : pool_size(size), task_ha
         pthread_detach(workers[i]);  // Detach thread to avoid memory leaks
     }
 
-    std::cout << "Thread pool initialized with " << pool_size << " workers\n";
+    UI::print_server_status("Thread pool initialized with " + std::to_string(pool_size) + " workers");
 }
 
 ThreadPool::~ThreadPool() {
@@ -55,7 +56,8 @@ void* ThreadPool::worker_thread(void* arg) {
 void ThreadPool::shutdown() {
     stop = true;
     pthread_mutex_lock(&client_fds_mutex);
-    std::cout << "Closing " << client_fds.size() << " pending connections...\n";
+    if (client_fds.size() > 0)
+        UI::print_warning("Closing " + std::to_string(client_fds.size()) + " pending connections...");
     while (!client_fds.empty()) {
         close(client_fds.front());
         client_fds.pop();

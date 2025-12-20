@@ -15,6 +15,7 @@
 #include <atomic>
 #include "server.hpp"
 #include "thread_pool.hpp"
+#include "ui_utils.hpp"
 
 /* Global variables */
 std::atomic<bool> receive_signal(false);
@@ -24,6 +25,8 @@ std::vector<int> conn_fds;
 pthread_mutex_t conn_fds_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
+    UI::print_banner("CHAT SERVER");
+    
     unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
     Server server(port);
 
@@ -33,7 +36,7 @@ int main(int argc, char **argv) {
     sigaddset(&signal_set, SIGINT);   // Ctrl+C
     sigaddset(&signal_set, SIGTERM);  // "kill" command
     pthread_sigmask(SIG_BLOCK, &signal_set, nullptr);
-    ThreadPool thread_pool(10, handle_client);
+    ThreadPool thread_pool(NUM_THREADS, handle_client);
 
     /* Register signal handler and then unblock signals */
     struct sigaction sa;
@@ -43,6 +46,11 @@ int main(int argc, char **argv) {
     sigaction(SIGINT, &sa, nullptr);
     sigaction(SIGTERM, &sa, nullptr);
     pthread_sigmask(SIG_UNBLOCK, &signal_set, nullptr);
+
+    UI::print_line();
+    UI::print_server_status("Server is ready and waiting for connections...");
+    UI::print_line();
+    std::cout << std::endl;
 
     while (!receive_signal) {
         int client_fd = server.accept_conn();
@@ -55,7 +63,7 @@ int main(int argc, char **argv) {
     for (int fd : conn_fds)
         shutdown(fd, SHUT_RD); // Close connection blocked in "recv" by client
     
-    std::cout << "Server closed successfully." << std::endl;
+    UI::print_warning("Server closed successfully.");
     return 0;
 }
 
@@ -102,7 +110,7 @@ Server::Server(unsigned short p) : port(p) {
     if (listen(listen_fd, 10) < 0)
         ERR_EXIT("listen");
 
-    std::cout << "Server initialized and listening on " << LOCAL_HOST << ":" << port << std::endl;
+    UI::print_success("Server initialized and listening on " + std::string(LOCAL_HOST) + ":" + std::to_string(port));
 }
 
 Server::~Server() {
@@ -110,7 +118,7 @@ Server::~Server() {
 }
 
 void Server::ERR_EXIT(const char *msg) {
-    throw (errno == 0) ? std::runtime_error(msg) : std::runtime_error(std::string(msg) + ": " + strerror(errno));
+    std::perror(msg);
     close_server();
     exit(EXIT_FAILURE);
 }
@@ -124,11 +132,11 @@ int Server::accept_conn() {
             case EINTR: // Interrupted by signals (Ctrl+C, kill, etc.)
                 return -1;
             case ECONNABORTED: // Connection aborted by peer
-                std::cerr << "Connection aborted by peer, continuing..." << std::endl;
+                UI::print_warning("Connection aborted by peer, continuing...");
                 return -1;
             case EMFILE:  // Per-process file descriptor limit
             case ENFILE:  // System-wide file descriptor limit
-                std::cerr << "Too many open files, retrying in 1 second..." << std::endl;
+                UI::print_error("Too many open files, retrying in 1 second...");
                 sleep(1);
                 return -1;
             case EPROTO:      // Protocol error
@@ -138,16 +146,16 @@ int Server::accept_conn() {
             case EHOSTUNREACH: // Host is unreachable
             case ENETUNREACH:  // Network unreachable
             case EAGAIN:      // Non-blocking mode, no connections
-                std::cerr << "Recoverable error in accept: " << strerror(errno) << ", continuing..." << std::endl;
+                UI::print_warning("Recoverable error in accept: " + std::string(strerror(errno)));
                 return -1;
             default: // Unexpected error
-                std::cerr << "Unexpected error in accept: " << strerror(errno) << std::endl;
+                UI::print_error("Unexpected error in accept: " + std::string(strerror(errno)));
                 receive_signal = false;
                 return -1;
         }
     }
 
-    std::cout << "New client connected from " << inet_ntoa(client_addr.sin_addr) << ":" << ntohs(client_addr.sin_port) << std::endl;
+    UI::print_client_connected(inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     return client_fd;
 }
 
@@ -321,6 +329,5 @@ void ClientConnection::disconnect() {
         }
         pthread_mutex_unlock(&users_mutex);
     }
-
     close(fd);
 }
