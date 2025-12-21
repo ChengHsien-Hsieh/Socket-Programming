@@ -541,9 +541,11 @@ void ChatClient::stop_listen_thread() {
     
     thread_running = false;
     
-    /* Interrupt blocking accept by closing socket */
+    /* Interrupt blocking accept by shutting down and closing socket */
     if (listen_fd >= 0) {
         shutdown(listen_fd, SHUT_RDWR);
+        close(listen_fd);
+        listen_fd = -1;
     }
     
     pthread_join(listen_thread, nullptr);
@@ -558,8 +560,7 @@ void* ChatClient::listen_thread_func(void* arg) {
         
         int peer_fd = accept(self->listen_fd, (sockaddr*)&peer_addr, &addr_len);
         if (peer_fd < 0) {
-            if (self->thread_running)
-                continue;
+            /* Accept failed - either shutdown or error, just exit */
             break;
         }
         
@@ -851,6 +852,18 @@ void ChatClient::cmd_messages(const std::string& room_name) {
         return;
     }
     
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    /* Send a request to server to trigger pending message delivery */
+    /* We use LIST_ROOMS as it's a lightweight query */
+    send_to_server(std::to_string(LIST_ROOMS));
+    std::string response;
+    recv_from_server(response);  // This will process any GROUP_NOTIFY messages
+    
+    /* Now display messages from local store */
     auto messages = message_store.get_by_room(room_name);
     if (messages.empty()) {
         UI::print_info("No messages in room '" + room_name + "'");
