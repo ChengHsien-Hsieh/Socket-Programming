@@ -30,7 +30,7 @@ std::vector<int> conn_fds;
 pthread_mutex_t conn_fds_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
-    UI::print_banner("CHAT SERVER");
+    ChatUI::print_banner("CHAT SERVER");
     
     unsigned short port = (argc >= 2) ? std::stoi(argv[1]) : DEFAULT_PORT;
     Server server(port);
@@ -53,9 +53,9 @@ int main(int argc, char **argv) {
     pthread_sigmask(SIG_UNBLOCK, &signal_set, nullptr);
 
     /* Print server ready message */
-    UI::print_line();
-    UI::print_server_status("Server is ready and waiting for connections...");
-    UI::print_line();
+    ChatUI::print_line();
+    ChatUI::print_server_status("Server is ready and waiting for connections...");
+    ChatUI::print_line();
     std::cout << std::endl;
 
     while (!receive_signal) {
@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
     for (int fd : conn_fds)
         shutdown(fd, SHUT_RD); // Close connection blocked in "recv" by client
     
-    UI::print_warning("Server closed successfully.");
+    ChatUI::print_warning("Server closed successfully.");
     return 0;
 }
 
@@ -116,7 +116,7 @@ Server::Server(unsigned short p) : port(p) {
     if (listen(listen_fd, BACKLOG) < 0)
         ERR_EXIT("listen");
 
-    UI::print_success("Server initialized and listening on " + std::string(LOCAL_HOST) + ":" + std::to_string(port));
+    ChatUI::print_success("Server initialized and listening on " + std::string(LOCAL_HOST) + ":" + std::to_string(port));
 }
 
 Server::~Server() {
@@ -132,11 +132,11 @@ int Server::accept_conn() {
             case EINTR: // Interrupted by signals (Ctrl+C, kill, etc.)
                 return -1;
             case ECONNABORTED: // Connection aborted by peer
-                UI::print_warning("Connection aborted by peer, continuing...");
+                ChatUI::print_warning("Connection aborted by peer, continuing...");
                 return -1;
             case EMFILE:  // Per-process file descriptor limit
             case ENFILE:  // System-wide file descriptor limit
-                UI::print_error("Too many open files, retrying in 1 second...");
+                ChatUI::print_error("Too many open files, retrying in 1 second...");
                 sleep(1);
                 return -1;
             case EPROTO:      // Protocol error
@@ -146,16 +146,16 @@ int Server::accept_conn() {
             case EHOSTUNREACH: // Host is unreachable
             case ENETUNREACH:  // Network unreachable
             case EAGAIN:      // Non-blocking mode, no connections
-                UI::print_warning("Recoverable error in accept: " + std::string(strerror(errno)));
+                ChatUI::print_warning("Recoverable error in accept: " + std::string(strerror(errno)));
                 return -1;
             default: // Unexpected error
-                UI::print_error("Unexpected error in accept: " + std::string(strerror(errno)));
+                ChatUI::print_error("Unexpected error in accept: " + std::string(strerror(errno)));
                 receive_signal = false;
                 return -1;
         }
     }
 
-    UI::print_client_connected(inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
+    ChatUI::print_client_connected(inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port));
     return client_fd;
 }
 
@@ -186,6 +186,11 @@ ClientConnection::ClientConnection(int client_fd) : fd(client_fd) {
     pthread_mutex_lock(&conn_fds_mutex);
     conn_fds.push_back(fd);
     pthread_mutex_unlock(&conn_fds_mutex);
+    
+    /* Perform ECDH key exchange with client */
+    if (!perform_key_exchange()) {
+        std::cerr << "[WARNING] Key exchange failed with " << ip << " - using unencrypted" << std::endl;
+    }
 }
 
 ClientConnection::~ClientConnection() {
@@ -309,7 +314,7 @@ void ClientConnection::handle_command(const std::string& command) {
             } else {
                 chat_rooms[room_name].insert(logged_in_name);  // Creator auto-joins
                 response = std::to_string(SUCCESS);
-                UI::print_server_status("Room created: " + room_name + " by " + logged_in_name);
+                ChatUI::print_server_status("Room created: " + room_name + " by " + logged_in_name);
             }
             pthread_mutex_unlock(&rooms_mutex);
             send_pending_messages();
@@ -331,7 +336,7 @@ void ClientConnection::handle_command(const std::string& command) {
             } else {
                 chat_rooms[room_name].insert(logged_in_name);
                 response = std::to_string(SUCCESS);
-                UI::print_server_status(logged_in_name + " joined room: " + room_name);
+                ChatUI::print_server_status(logged_in_name + " joined room: " + room_name);
             }
             pthread_mutex_unlock(&rooms_mutex);
             send_pending_messages();
@@ -357,10 +362,10 @@ void ClientConnection::handle_command(const std::string& command) {
                 // Delete room if empty
                 if (chat_rooms[room_name].empty()) {
                     chat_rooms.erase(room_name);
-                    UI::print_server_status("Room deleted (empty): " + room_name);
+                    ChatUI::print_server_status("Room deleted (empty): " + room_name);
                 }
                 response = std::to_string(SUCCESS);
-                UI::print_server_status(logged_in_name + " left room: " + room_name);
+                ChatUI::print_server_status(logged_in_name + " left room: " + room_name);
             }
             pthread_mutex_unlock(&rooms_mutex);
             send_pending_messages();
@@ -428,7 +433,7 @@ void ClientConnection::handle_command(const std::string& command) {
             }
             pthread_mutex_unlock(&pending_mutex);
             
-            UI::print_server_status("Group message queued for " + std::to_string(members.size() - 1) + " member(s) in room: " + room_name);
+            ChatUI::print_server_status("Group message queued for " + std::to_string(members.size() - 1) + " member(s) in room: " + room_name);
             
             response = std::to_string(SUCCESS);
             send_pending_messages();
@@ -468,7 +473,20 @@ void ClientConnection::send_pending_messages() {
 }
 
 void ClientConnection::send_line(const std::string& s) {
-    std::string line = s + "\n";
+    std::string line;
+    
+    /* Use encrypted transmission if session is established */
+    if (crypto.is_established()) {
+        std::vector<unsigned char> encrypted = crypto.encrypt(s);
+        if (!encrypted.empty()) {
+            line = "ENC:" + CryptoUtils::base64_encode(encrypted) + "\n";
+        } else {
+            line = s + "\n";  /* Fallback to unencrypted */
+        }
+    } else {
+        line = s + "\n";
+    }
+    
     ssize_t total_sent = 0;
     ssize_t len = line.length();
     while (total_sent < len) {
@@ -493,6 +511,7 @@ void ClientConnection::send_line(const std::string& s) {
 
 bool ClientConnection::recv_line(std::string& out) {
     out.clear();
+    std::string raw;
     char c;
     while (true) {
         ssize_t n = recv(fd, &c, 1, 0);
@@ -514,9 +533,65 @@ bool ClientConnection::recv_line(std::string& out) {
             return false;
 
         if (c == '\n')
-            return true;
-        out += c;
+            break;
+        raw += c;
     }
+    
+    /* Check if message is encrypted (has "ENC:" prefix) */
+    if (raw.substr(0, 4) == "ENC:" && crypto.is_established()) {
+        std::string encoded = raw.substr(4);
+        std::vector<unsigned char> encrypted = CryptoUtils::base64_decode(encoded);
+        out = crypto.decrypt(encrypted);
+        return !out.empty();
+    }
+    
+    out = raw;
+    return true;
+}
+
+bool ClientConnection::perform_key_exchange() {
+    /* Wait for client's public key */
+    std::string request;
+    char c;
+    while (true) {
+        ssize_t n = recv(fd, &c, 1, 0);
+        if (n <= 0) return false;
+        if (c == '\n') break;
+        request += c;
+    }
+    
+    /* Parse KEY_EXCHANGE request */
+    const char* prefix = "KEY_EXCHANGE ";
+    if (request.substr(0, strlen(prefix)) != prefix) {
+        return false;
+    }
+    
+    std::string client_pubkey_encoded = request.substr(strlen(prefix));
+    std::vector<unsigned char> client_pubkey = CryptoUtils::base64_decode(client_pubkey_encoded);
+    
+    /* Generate our keypair */
+    if (!crypto.generate_keypair()) {
+        return false;
+    }
+    
+    /* Get our public key */
+    std::vector<unsigned char> my_pubkey = crypto.get_public_key();
+    if (my_pubkey.empty()) {
+        return false;
+    }
+    
+    /* Send our public key */
+    std::string response = std::string("KEY_EXCHANGE_RESPONSE ") + CryptoUtils::base64_encode(my_pubkey) + "\n";
+    ssize_t total_sent = 0;
+    ssize_t len = response.length();
+    while (total_sent < len) {
+        ssize_t sent = send(fd, response.c_str() + total_sent, len - total_sent, 0);
+        if (sent <= 0) return false;
+        total_sent += sent;
+    }
+    
+    /* Derive shared session key */
+    return crypto.derive_session_key(client_pubkey);
 }
 
 void ClientConnection::disconnect() {

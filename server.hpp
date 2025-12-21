@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <iostream>
 #include <atomic>
+#include "crypto_utils.hpp"
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 #define LOCAL_HOST "127.0.0.1"
@@ -56,8 +57,10 @@ private:
     int fd;
     std::string ip;
     std::string logged_in_name = "";
+    CryptoSession crypto;               // Encrypted session with client
     void ERR_EXIT(const char *msg);
     void send_pending_messages();  // Send pending group messages before response
+    bool perform_key_exchange();   // Perform ECDH key exchange with client
 
 public:
     explicit ClientConnection(int client_fd);

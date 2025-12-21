@@ -5,7 +5,11 @@
 # 編譯器和編譯選項
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -O2
-LDFLAGS = -pthread
+
+# OpenSSL 路徑 (macOS Homebrew)
+OPENSSL_PREFIX := $(shell brew --prefix openssl@3 2>/dev/null || echo "/opt/homebrew/opt/openssl@3")
+CXXFLAGS += -I$(OPENSSL_PREFIX)/include
+LDFLAGS = -pthread -L$(OPENSSL_PREFIX)/lib -lssl -lcrypto
 
 # 目標檔案
 SERVER = server
@@ -16,8 +20,8 @@ SERVER_SRC = server.cpp thread_pool.cpp
 CLIENT_SRC = client.cpp network_utils.cpp
 
 # 標頭檔案
-SERVER_HDR = server.hpp thread_pool.hpp
-CLIENT_HDR = client.hpp network_utils.hpp message_store.hpp ui_utils.hpp
+SERVER_HDR = server.hpp thread_pool.hpp crypto_utils.hpp
+CLIENT_HDR = client.hpp network_utils.hpp message_store.hpp ui_utils.hpp crypto_utils.hpp
 
 # 預設目標：編譯所有程式
 all: $(SERVER) $(CLIENT)
@@ -29,7 +33,7 @@ $(SERVER): $(SERVER_SRC) $(SERVER_HDR)
 
 # 編譯 client
 $(CLIENT): $(CLIENT_SRC) $(CLIENT_HDR)
-	$(CXX) $(CXXFLAGS) $(CLIENT_SRC) -o $(CLIENT)
+	$(CXX) $(CXXFLAGS) $(CLIENT_SRC) -o $(CLIENT) $(LDFLAGS)
 	@echo "✅ Client compiled successfully!"
 
 # 只編譯 server

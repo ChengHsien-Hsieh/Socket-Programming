@@ -7,7 +7,7 @@
 #include <mutex>
 
 /* Global mutex for thread-safe console output */
-namespace UI {
+namespace ChatUI {
     inline std::mutex& get_cout_mutex() {
         static std::mutex cout_mutex;
         return cout_mutex;
@@ -44,7 +44,7 @@ namespace Color {
 }
 
 /* UI Helper Functions */
-namespace UI {
+namespace ChatUI {
     // Box drawing characters
     const std::string BOX_H = "─";
     const std::string BOX_V = "│";

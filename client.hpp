@@ -1,6 +1,7 @@
 #pragma once
 #include "network_utils.hpp"
 #include "message_store.hpp"
+#include "crypto_utils.hpp"
 #include <string>
 #include <atomic>
 #include <mutex>
@@ -31,6 +32,7 @@ private:
     int server_fd;
     bool should_continue;
     std::string logged_in_name;
+    CryptoSession server_crypto;        // Encrypted session with server
     
     /* P2P listening */
     int listen_fd;
@@ -43,6 +45,7 @@ private:
     int chat_fd;                        // Active chat connection (-1 if none)
     std::string chat_partner;           // Name of current chat partner
     std::mutex chat_mutex;              // Protect chat state
+    CryptoSession chat_crypto;          // Encrypted session with chat partner
     
     /* Chat receive thread (active during chat mode) */
     pthread_t chat_recv_thread;
@@ -113,6 +116,11 @@ private:
     bool recv_from_server(std::string& response);
     std::string get_user_address(const std::string& username);
     void print_error_message(int error_code);
+    
+    /* Encryption key exchange */
+    bool perform_key_exchange_with_server();
+    bool perform_key_exchange_as_initiator(int peer_fd, CryptoSession& crypto);
+    bool perform_key_exchange_as_responder(int peer_fd, CryptoSession& crypto);
     
     /* Cleanup helper */
     void ERR_EXIT(const char* msg);

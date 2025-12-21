@@ -12,7 +12,7 @@ int main(int argc, char** argv) {
     ChatClient client(server_ip, server_port);
     client.run();
 
-    UI::print_warning("Connection closed.");
+    ChatUI::print_warning("Connection closed.");
     return 0;
 }
 
@@ -39,7 +39,14 @@ ChatClient::ChatClient(const std::string& server_ip, int server_port)
     if (connect(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
         ERR_EXIT("connect");
 
-    UI::print_success("Connected to server at " + server_ip + ":" + std::to_string(server_port));
+    ChatUI::print_success("Connected to server at " + server_ip + ":" + std::to_string(server_port));
+    
+    /* Perform ECDH key exchange with server */
+    if (!perform_key_exchange_with_server()) {
+        ChatUI::print_warning("Key exchange failed - communication will be unencrypted");
+    } else {
+        ChatUI::print_success("Secure connection established (ECDH + AES-256-GCM)");
+    }
 }
 
 ChatClient::~ChatClient() {
@@ -54,9 +61,9 @@ ChatClient::~ChatClient() {
    =================================== */
 
 void ChatClient::run() {
-    UI::print_banner("CHAT CLIENT");
-    UI::print_line();
-    UI::print_info("Available commands:");
+    ChatUI::print_banner("CHAT CLIENT");
+    ChatUI::print_line();
+    ChatUI::print_info("Available commands:");
     std::cout << Color::DIM << "  register <name> <password>" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  login <name> <password> <port>" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  logout" << Color::RESET << std::endl;
@@ -70,7 +77,7 @@ void ChatClient::run() {
     std::cout << Color::DIM << "  list_rooms" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  group_send <room_name> <message>" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  quit" << Color::RESET << std::endl;
-    UI::print_line();
+    ChatUI::print_line();
     std::cout << std::endl;
 
     while (should_continue) {
@@ -81,9 +88,9 @@ void ChatClient::run() {
         else {
             /* Normal mode */
             if (current_state == STATE_PENDING_REQUEST)
-                UI::print_info("Pending chat request from '" + pending_requester + "'. Type 'accept' or 'reject'");
+                ChatUI::print_info("Pending chat request from '" + pending_requester + "'. Type 'accept' or 'reject'");
             
-            UI::print_prompt();
+            ChatUI::print_prompt();
             std::string command;
             if (!std::getline(std::cin, command))
                 break;
@@ -176,28 +183,28 @@ void ChatClient::handle_normal_command(const std::string& command) {
 
 void ChatClient::cmd_chat(const std::string& target_name) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (target_name.empty()) {
-        UI::print_error("Usage: chat <username>");
+        ChatUI::print_error("Usage: chat <username>");
         return;
     }
     
     if (target_name == logged_in_name) {
-        UI::print_error("Cannot chat with yourself");
+        ChatUI::print_error("Cannot chat with yourself");
         return;
     }
     
     ClientState expected = STATE_NORMAL;
     if (!client_state.compare_exchange_strong(expected, STATE_WAITING_ACCEPT)) {
         if (expected == STATE_IN_CHAT)
-            UI::print_error("Already in a chat session");
+            ChatUI::print_error("Already in a chat session");
         else if (expected == STATE_WAITING_ACCEPT)
-            UI::print_error("Already waiting for a chat response");
+            ChatUI::print_error("Already waiting for a chat response");
         else if (expected == STATE_PENDING_REQUEST)
-            UI::print_error("You have a pending chat request. Accept or reject it first.");
+            ChatUI::print_error("You have a pending chat request. Accept or reject it first.");
         return;
     }
     
@@ -216,7 +223,7 @@ void ChatClient::cmd_chat(const std::string& target_name) {
     /* Connect to target's P2P listening port */
     int peer_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (peer_fd < 0) {
-        UI::print_error("Failed to create socket");
+        ChatUI::print_error("Failed to create socket");
         client_state = STATE_NORMAL;
         return;
     }
@@ -227,7 +234,7 @@ void ChatClient::cmd_chat(const std::string& target_name) {
     peer_addr.sin_port = htons(port);
     
     if (connect(peer_fd, (sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
-        UI::print_error("Failed to connect to " + target_name);
+        ChatUI::print_error("Failed to connect to " + target_name);
         close(peer_fd);
         client_state = STATE_NORMAL;
         return;
@@ -236,18 +243,18 @@ void ChatClient::cmd_chat(const std::string& target_name) {
     /* Send CHAT_REQUEST */
     std::string request = std::to_string(CHAT_REQUEST) + " " + logged_in_name;
     if (!NetworkUtils::send_line(peer_fd, request)) {
-        UI::print_error("Failed to send chat request");
+        ChatUI::print_error("Failed to send chat request");
         close(peer_fd);
         client_state = STATE_NORMAL;
         return;
     }
     
-    UI::print_info("Chat request sent to " + target_name + ". Waiting for response...");
+    ChatUI::print_info("Chat request sent to " + target_name + ". Waiting for response...");
     
     /* Wait for response (blocking) */
     std::string response;
     if (!NetworkUtils::recv_line(peer_fd, response)) {
-        UI::print_error("Connection closed by " + target_name);
+        ChatUI::print_error("Connection closed by " + target_name);
         close(peer_fd);
         client_state = STATE_NORMAL;
         return;
@@ -258,8 +265,18 @@ void ChatClient::cmd_chat(const std::string& target_name) {
     resp_iss >> resp_type;
     
     if (resp_type == CHAT_ACCEPT) {
-        UI::print_success(target_name + " accepted your chat request!");
-        UI::print_info("You are now chatting with " + target_name + ". Type 'exit' to leave.");
+        ChatUI::print_success(target_name + " accepted your chat request!");
+        
+        /* Perform key exchange as initiator */
+        chat_crypto.reset();
+        if (!perform_key_exchange_as_initiator(peer_fd, chat_crypto)) {
+            ChatUI::print_error("Key exchange failed");
+            close(peer_fd);
+            client_state = STATE_NORMAL;
+            return;
+        }
+        ChatUI::print_success("Secure P2P chat established (ECDH + AES-256-GCM)");
+        ChatUI::print_info("You are now chatting with " + target_name + ". Type 'exit' to leave.");
         
         {
             std::lock_guard<std::mutex> lock(chat_mutex);
@@ -276,15 +293,15 @@ void ChatClient::cmd_chat(const std::string& target_name) {
             reason = reason.substr(1);
         
         if (reason == "busy")
-            UI::print_warning(target_name + " is busy (already in a chat)");
+            ChatUI::print_warning(target_name + " is busy (already in a chat)");
         else
-            UI::print_warning(target_name + " rejected your chat request");
+            ChatUI::print_warning(target_name + " rejected your chat request");
         
         close(peer_fd);
         client_state = STATE_NORMAL;
     }
     else {
-        UI::print_error("Unexpected response from " + target_name);
+        ChatUI::print_error("Unexpected response from " + target_name);
         close(peer_fd);
         client_state = STATE_NORMAL;
     }
@@ -292,7 +309,7 @@ void ChatClient::cmd_chat(const std::string& target_name) {
 
 void ChatClient::cmd_accept() {
     if (client_state != STATE_PENDING_REQUEST) {
-        UI::print_error("No pending chat request to accept");
+        ChatUI::print_error("No pending chat request to accept");
         return;
     }
     
@@ -302,7 +319,7 @@ void ChatClient::cmd_accept() {
         /* Send CHAT_ACCEPT */
         std::string response = std::to_string(CHAT_ACCEPT);
         if (!NetworkUtils::send_line(pending_request_fd, response)) {
-            UI::print_error("Failed to accept chat request");
+            ChatUI::print_error("Failed to accept chat request");
             close(pending_request_fd);
             pending_request_fd = -1;
             pending_requester.clear();
@@ -310,7 +327,18 @@ void ChatClient::cmd_accept() {
             return;
         }
         
-        UI::print_success("You are now chatting with " + pending_requester + ". Type 'exit' to leave.");
+        /* Perform key exchange as responder */
+        chat_crypto.reset();
+        if (!perform_key_exchange_as_responder(pending_request_fd, chat_crypto)) {
+            ChatUI::print_error("Key exchange failed");
+            close(pending_request_fd);
+            pending_request_fd = -1;
+            pending_requester.clear();
+            client_state = STATE_NORMAL;
+            return;
+        }
+        ChatUI::print_success("Secure P2P chat established (ECDH + AES-256-GCM)");
+        ChatUI::print_success("You are now chatting with " + pending_requester + ". Type 'exit' to leave.");
         
         chat_fd = pending_request_fd;
         chat_partner = pending_requester;
@@ -325,7 +353,7 @@ void ChatClient::cmd_accept() {
 
 void ChatClient::cmd_reject() {
     if (client_state != STATE_PENDING_REQUEST) {
-        UI::print_error("No pending chat request to reject");
+        ChatUI::print_error("No pending chat request to reject");
         return;
     }
     
@@ -338,14 +366,14 @@ void ChatClient::cmd_reject() {
     close(pending_request_fd);
     pending_request_fd = -1;
     
-    UI::print_info("Rejected chat request from " + pending_requester);
+    ChatUI::print_info("Rejected chat request from " + pending_requester);
     pending_requester.clear();
     client_state = STATE_NORMAL;
 }
 
 void ChatClient::enter_chat_mode() {
     /* Chat mode: handle both user input and incoming messages */
-    UI::print_chat_prompt();
+    ChatUI::print_chat_prompt();
     
     std::string input;
     if (!std::getline(std::cin, input)) {
@@ -358,7 +386,7 @@ void ChatClient::enter_chat_mode() {
 
 void ChatClient::handle_chat_input(const std::string& input) {
     if (input == "exit") {
-        /* Send CHAT_END to peer */
+        /* Send CHAT_END to peer (unencrypted control message) */
         std::string msg = std::to_string(CHAT_END);
         NetworkUtils::send_line(chat_fd, msg);
         exit_chat_mode();
@@ -368,10 +396,10 @@ void ChatClient::handle_chat_input(const std::string& input) {
     if (input.empty())
         return;
     
-    /* Send CHAT_MSG */
+    /* Send CHAT_MSG (encrypted) */
     std::string msg = std::to_string(CHAT_MSG) + " " + input;
-    if (!NetworkUtils::send_line(chat_fd, msg)) {
-        UI::print_error("Failed to send message. Connection lost.");
+    if (!NetworkUtils::send_encrypted(chat_fd, msg, chat_crypto)) {
+        ChatUI::print_error("Failed to send message. Connection lost.");
         exit_chat_mode();
         return;
     }
@@ -402,7 +430,7 @@ void ChatClient::exit_chat_mode() {
     }
     
     if (!chat_partner.empty()) {
-        UI::print_info("Left chat with " + chat_partner);
+        ChatUI::print_info("Left chat with " + chat_partner);
         chat_partner.clear();
     }
     client_state = STATE_NORMAL;
@@ -434,14 +462,14 @@ void* ChatClient::chat_recv_thread_func(void* arg) {
     ChatClient* self = static_cast<ChatClient*>(arg);
     
     while (self->chat_recv_running && self->client_state == STATE_IN_CHAT) {
-        std::string message;
-        if (!NetworkUtils::recv_line(self->chat_fd, message)) {
+        std::string raw_message;
+        if (!NetworkUtils::recv_line(self->chat_fd, raw_message)) {
             /* Connection lost */
             if (self->chat_recv_running && self->client_state == STATE_IN_CHAT) {
                 self->chat_recv_running = false;
                 
                 std::cout << "\r\033[K";  /* Clear current line */
-                UI::print_warning(self->chat_partner + " has disconnected");
+                ChatUI::print_warning(self->chat_partner + " has disconnected");
                 
                 std::lock_guard<std::mutex> lock(self->chat_mutex);
                 if (self->chat_fd >= 0) {
@@ -452,6 +480,20 @@ void* ChatClient::chat_recv_thread_func(void* arg) {
                 self->client_state = STATE_NORMAL;
             }
             break;
+        }
+        
+        std::string message;
+        /* Check if message is encrypted (has "ENC:" prefix) */
+        if (raw_message.substr(0, 4) == "ENC:") {
+            std::string encoded = raw_message.substr(4);
+            std::vector<unsigned char> encrypted = CryptoUtils::base64_decode(encoded);
+            message = self->chat_crypto.decrypt(encrypted);
+            if (message.empty()) {
+                continue;  /* Decryption failed, skip */
+            }
+        } else {
+            /* Unencrypted control message */
+            message = raw_message;
         }
         
         std::istringstream iss(message);
@@ -470,7 +512,7 @@ void* ChatClient::chat_recv_thread_func(void* arg) {
             self->chat_recv_running = false;
             
             std::cout << "\r\033[K";  /* Clear current line */
-            UI::print_warning(self->chat_partner + " has left the chat");
+            ChatUI::print_warning(self->chat_partner + " has left the chat");
             
             std::lock_guard<std::mutex> lock(self->chat_mutex);
             if (self->chat_fd >= 0) {
@@ -600,7 +642,7 @@ void ChatClient::handle_p2p_connection(int peer_fd) {
                 content = content.substr(1);
             /* Store as direct message with "DM" as room name */
             message_store.add("DM", sender, content);
-            UI::print_local_message("New message from " + sender);
+            ChatUI::print_local_message("New message from " + sender);
             close(peer_fd);
             break;
         }
@@ -630,18 +672,18 @@ void ChatClient::handle_chat_request(int peer_fd, const std::string& requester_n
     }
     
     /* Notify user - they will see this on next prompt */
-    UI::print_local_message("Chat request from " + requester_name + "! Type 'accept' or 'reject'");
+    ChatUI::print_local_message("Chat request from " + requester_name + "! Type 'accept' or 'reject'");
 }
 
 void ChatClient::handle_chat_message(const std::string& message) {
     std::cout << "\r\033[K";  /* Clear current line */
     std::cout << Color::CYAN << chat_partner << Color::RESET << ": " << message << std::endl;
-    UI::print_chat_prompt();
+    ChatUI::print_chat_prompt();
     std::cout.flush();
 }
 
 void ChatClient::handle_chat_end() {
-    UI::print_warning(chat_partner + " has left the chat");
+    ChatUI::print_warning(chat_partner + " has left the chat");
     exit_chat_mode();
 }
 
@@ -651,7 +693,7 @@ void ChatClient::handle_chat_end() {
 
 void ChatClient::cmd_register(const std::string& name, const std::string& password) {
     if (name.empty() || password.empty()) {
-        UI::print_error("Usage: register <name> <password>");
+        ChatUI::print_error("Usage: register <name> <password>");
         return;
     }
 
@@ -666,7 +708,7 @@ void ChatClient::cmd_register(const std::string& name, const std::string& passwo
     iss >> response_code;
     
     if (response_code == SUCCESS) {
-        UI::print_success("Register Success!");
+        ChatUI::print_success("Register Success!");
     }
     else {
         int error_code;
@@ -677,7 +719,7 @@ void ChatClient::cmd_register(const std::string& name, const std::string& passwo
 
 void ChatClient::cmd_login(const std::string& name, const std::string& password, const std::string& port_str) {
     if (name.empty() || password.empty() || port_str.empty()) {
-        UI::print_error("Usage: login <name> <password> <port>");
+        ChatUI::print_error("Usage: login <name> <password> <port>");
         return;
     }
 
@@ -687,16 +729,16 @@ void ChatClient::cmd_login(const std::string& name, const std::string& password,
         size_t pos;
         port = std::stoi(port_str, &pos);
         if (pos != port_str.length()) {
-            UI::print_error("Port must be a valid number");
+            ChatUI::print_error("Port must be a valid number");
             return;
         }
     } catch (const std::exception&) {
-        UI::print_error("Port must be a valid number");
+        ChatUI::print_error("Port must be a valid number");
         return;
     }
 
     if (port < 1024 || port > 65535) {
-        UI::print_error("Port must be between 1024 and 65535");
+        ChatUI::print_error("Port must be between 1024 and 65535");
         return;
     }
 
@@ -705,7 +747,7 @@ void ChatClient::cmd_login(const std::string& name, const std::string& password,
         close_listening_socket();
     
     if (!create_listening_socket(port)) {
-        UI::print_error("Port " + std::to_string(port) + " is not available");
+        ChatUI::print_error("Port " + std::to_string(port) + " is not available");
         return;
     }
 
@@ -720,7 +762,7 @@ void ChatClient::cmd_login(const std::string& name, const std::string& password,
     iss >> response_code;
     
     if (response_code == SUCCESS) {
-        UI::print_success("Login Success!");
+        ChatUI::print_success("Login Success!");
         logged_in_name = name;
         start_listen_thread();
     }
@@ -734,13 +776,13 @@ void ChatClient::cmd_login(const std::string& name, const std::string& password,
 
 void ChatClient::cmd_logout() {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     /* Cannot logout while in chat */
     if (client_state == STATE_IN_CHAT) {
-        UI::print_error("Cannot logout while in a chat session. Type 'exit' first.");
+        ChatUI::print_error("Cannot logout while in a chat session. Type 'exit' first.");
         return;
     }
 
@@ -755,7 +797,7 @@ void ChatClient::cmd_logout() {
     iss >> response_code;
     
     if (response_code == SUCCESS) {
-        UI::print_success("Logout Success!");
+        ChatUI::print_success("Logout Success!");
         stop_listen_thread();
         close_listening_socket();
         logged_in_name.clear();
@@ -783,7 +825,7 @@ void ChatClient::cmd_list() {
         std::string output = "Online Users:";
         while (iss >> name)
             output += " " + name;
-        UI::print_server_message(output);
+        ChatUI::print_server_message(output);
     }
     else {
         int error_code;
@@ -794,17 +836,17 @@ void ChatClient::cmd_list() {
 
 void ChatClient::cmd_send(const std::string& target_name, const std::string& message) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (target_name.empty()) {
-        UI::print_error("Usage: send <username> <message>");
+        ChatUI::print_error("Usage: send <username> <message>");
         return;
     }
 
     if (message.empty()) {
-        UI::print_error("Message cannot be empty");
+        ChatUI::print_error("Message cannot be empty");
         return;
     }
 
@@ -821,7 +863,7 @@ void ChatClient::cmd_send(const std::string& target_name, const std::string& mes
     /* Send quick P2P message (fire-and-forget) */
     int peer_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (peer_fd < 0) {
-        UI::print_error("Failed to create socket");
+        ChatUI::print_error("Failed to create socket");
         return;
     }
 
@@ -831,7 +873,7 @@ void ChatClient::cmd_send(const std::string& target_name, const std::string& mes
     peer_addr.sin_port = htons(port);
 
     if (connect(peer_fd, (sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
-        UI::print_error("Failed to connect to " + target_name);
+        ChatUI::print_error("Failed to connect to " + target_name);
         close(peer_fd);
         return;
     }
@@ -839,21 +881,21 @@ void ChatClient::cmd_send(const std::string& target_name, const std::string& mes
     /* Use CHAT_MSG with sender name for quick message */
     std::string msg = std::to_string(CHAT_MSG) + " " + logged_in_name + " " + message;
     if (NetworkUtils::send_line(peer_fd, msg))
-        UI::print_success("Message sent to " + target_name);
+        ChatUI::print_success("Message sent to " + target_name);
     else
-        UI::print_error("Failed to send message to " + target_name);
+        ChatUI::print_error("Failed to send message to " + target_name);
 
     close(peer_fd);
 }
 
 void ChatClient::cmd_messages(const std::string& room_name) {
     if (room_name.empty()) {
-        UI::print_error("Usage: messages <room_name>");
+        ChatUI::print_error("Usage: messages <room_name>");
         return;
     }
     
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
@@ -866,14 +908,14 @@ void ChatClient::cmd_messages(const std::string& room_name) {
     /* Now display messages from local store */
     auto messages = message_store.get_by_room(room_name);
     if (messages.empty()) {
-        UI::print_info("No messages in room '" + room_name + "'");
+        ChatUI::print_info("No messages in room '" + room_name + "'");
         return;
     }
     
-    UI::print_info("=== Messages in [" + room_name + "] ===");
+    ChatUI::print_info("=== Messages in [" + room_name + "] ===");
     for (const auto& msg : messages)
         std::cout << "[" << msg.timestamp << "] " << msg.sender << ": " << msg.content << std::endl;
-    UI::print_info("================================");
+    ChatUI::print_info("================================");
 }
 
 void ChatClient::cmd_quit() {
@@ -893,7 +935,7 @@ void ChatClient::cmd_quit() {
     /* Stop listening thread */
     stop_listen_thread();
     
-    UI::print_info("Goodbye!");
+    ChatUI::print_info("Goodbye!");
     should_continue = false;
 }
 
@@ -903,12 +945,12 @@ void ChatClient::cmd_quit() {
 
 void ChatClient::cmd_create_room(const std::string& room_name) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (room_name.empty()) {
-        UI::print_error("Usage: create_room <room_name>");
+        ChatUI::print_error("Usage: create_room <room_name>");
         return;
     }
     
@@ -923,7 +965,7 @@ void ChatClient::cmd_create_room(const std::string& room_name) {
     iss >> response_code;
     
     if (response_code == SUCCESS)
-        UI::print_success("Room '" + room_name + "' created successfully!");
+        ChatUI::print_success("Room '" + room_name + "' created successfully!");
     else {
         int error_code;
         iss >> error_code;
@@ -933,12 +975,12 @@ void ChatClient::cmd_create_room(const std::string& room_name) {
 
 void ChatClient::cmd_join_room(const std::string& room_name) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (room_name.empty()) {
-        UI::print_error("Usage: join_room <room_name>");
+        ChatUI::print_error("Usage: join_room <room_name>");
         return;
     }
     
@@ -953,7 +995,7 @@ void ChatClient::cmd_join_room(const std::string& room_name) {
     iss >> response_code;
     
     if (response_code == SUCCESS)
-        UI::print_success("Joined room '" + room_name + "' successfully!");
+        ChatUI::print_success("Joined room '" + room_name + "' successfully!");
     else {
         int error_code;
         iss >> error_code;
@@ -963,12 +1005,12 @@ void ChatClient::cmd_join_room(const std::string& room_name) {
 
 void ChatClient::cmd_leave_room(const std::string& room_name) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (room_name.empty()) {
-        UI::print_error("Usage: leave_room <room_name>");
+        ChatUI::print_error("Usage: leave_room <room_name>");
         return;
     }
     
@@ -983,7 +1025,7 @@ void ChatClient::cmd_leave_room(const std::string& room_name) {
     iss >> response_code;
     
     if (response_code == SUCCESS)
-        UI::print_success("Left room '" + room_name + "' successfully!");
+        ChatUI::print_success("Left room '" + room_name + "' successfully!");
     else {
         int error_code;
         iss >> error_code;
@@ -993,7 +1035,7 @@ void ChatClient::cmd_leave_room(const std::string& room_name) {
 
 void ChatClient::cmd_list_rooms() {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
@@ -1014,7 +1056,7 @@ void ChatClient::cmd_list_rooms() {
             output += " " + room;
         if (output == "Available Rooms:")
             output += " (none)";
-        UI::print_server_message(output);
+        ChatUI::print_server_message(output);
     } else {
         int error_code;
         iss >> error_code;
@@ -1024,17 +1066,17 @@ void ChatClient::cmd_list_rooms() {
 
 void ChatClient::cmd_group_send(const std::string& room_name, const std::string& message) {
     if (logged_in_name.empty()) {
-        UI::print_error("You must login first");
+        ChatUI::print_error("You must login first");
         return;
     }
     
     if (room_name.empty()) {
-        UI::print_error("Usage: group_send <room_name> <message>");
+        ChatUI::print_error("Usage: group_send <room_name> <message>");
         return;
     }
     
     if (message.empty()) {
-        UI::print_error("Message cannot be empty");
+        ChatUI::print_error("Message cannot be empty");
         return;
     }
     
@@ -1049,7 +1091,7 @@ void ChatClient::cmd_group_send(const std::string& room_name, const std::string&
     iss >> response_code;
     
     if (response_code == SUCCESS)
-        UI::print_success("Message sent to room '" + room_name + "'");
+        ChatUI::print_success("Message sent to room '" + room_name + "'");
     else {
         int error_code;
         iss >> error_code;
@@ -1080,7 +1122,7 @@ void ChatClient::cmd_unknown() {
    =================================== */
 
 bool ChatClient::send_to_server(const std::string& message) {
-    if (!NetworkUtils::send_line(server_fd, message)) {
+    if (!NetworkUtils::send_encrypted(server_fd, message, server_crypto)) {
         should_continue = false;
         return false;
     }
@@ -1090,7 +1132,7 @@ bool ChatClient::send_to_server(const std::string& message) {
 bool ChatClient::recv_from_server(std::string& response) {
     /* Keep receiving until we get a non-GROUP_NOTIFY response */
     while (true) {
-        if (!NetworkUtils::recv_line(server_fd, response)) {
+        if (!NetworkUtils::recv_encrypted(server_fd, response, server_crypto)) {
             should_continue = false;
             return false;
         }
@@ -1142,9 +1184,9 @@ std::string ChatClient::get_user_address(const std::string& username) {
 
 void ChatClient::print_error_message(int error_code) {
     if (error_code >= 0 && error_code < 11)
-        UI::print_error(ERROR_MESSAGES[error_code]);
+        ChatUI::print_error(ERROR_MESSAGES[error_code]);
     else
-        UI::print_error("Unknown error");
+        ChatUI::print_error("Unknown error");
 }
 
 void ChatClient::ERR_EXIT(const char* msg) {
@@ -1152,4 +1194,145 @@ void ChatClient::ERR_EXIT(const char* msg) {
     if (server_fd >= 0)
         close(server_fd);
     exit(EXIT_FAILURE);
+}
+
+/* ===================================
+   Encryption Key Exchange
+   =================================== */
+
+bool ChatClient::perform_key_exchange_with_server() {
+#if CRYPTO_DEBUG
+    std::cerr << "\n\033[33m╔══════════════════════════════════════════════════════════╗\033[0m" << std::endl;
+    std::cerr << "\033[33m║\033[0m \033[1;36m🔑 ECDH KEY EXCHANGE (P-256 Curve)\033[0m" << std::endl;
+    std::cerr << "\033[33m╠══════════════════════════════════════════════════════════╣\033[0m" << std::endl;
+#endif
+    
+    /* Generate keypair */
+    if (!server_crypto.generate_keypair()) {
+        return false;
+    }
+    
+    /* Get our public key */
+    std::vector<unsigned char> my_pubkey = server_crypto.get_public_key();
+    if (my_pubkey.empty()) {
+        return false;
+    }
+    
+#if CRYPTO_DEBUG
+    std::string my_pubkey_b64 = CryptoUtils::base64_encode(my_pubkey);
+    std::cerr << "\033[33m║\033[0m \033[32mClient Public Key:\033[0m" << std::endl;
+    std::cerr << "\033[33m║\033[0m   " << my_pubkey_b64.substr(0, 50) << "..." << std::endl;
+#endif
+    
+    /* Send our public key */
+    std::string encoded_pubkey = CryptoUtils::base64_encode(my_pubkey);
+    if (!NetworkUtils::send_line(server_fd, std::string(KEY_EXCHANGE_PREFIX) + encoded_pubkey)) {
+        return false;
+    }
+    
+    /* Receive server's public key */
+    std::string response;
+    if (!NetworkUtils::recv_line(server_fd, response)) {
+        return false;
+    }
+    
+    /* Parse response */
+    if (response.substr(0, strlen(KEY_EXCHANGE_RESPONSE_PREFIX)) != KEY_EXCHANGE_RESPONSE_PREFIX) {
+        return false;
+    }
+    
+    std::string server_pubkey_encoded = response.substr(strlen(KEY_EXCHANGE_RESPONSE_PREFIX));
+    std::vector<unsigned char> server_pubkey = CryptoUtils::base64_decode(server_pubkey_encoded);
+    
+#if CRYPTO_DEBUG
+    std::cerr << "\033[33m║\033[0m \033[32mServer Public Key:\033[0m" << std::endl;
+    std::cerr << "\033[33m║\033[0m   " << server_pubkey_encoded.substr(0, 50) << "..." << std::endl;
+    std::cerr << "\033[33m╠══════════════════════════════════════════════════════════╣\033[0m" << std::endl;
+    std::cerr << "\033[33m║\033[0m \033[1;35m🔐 Deriving Session Key via HKDF (SHA-256)...\033[0m" << std::endl;
+#endif
+    
+    /* Derive shared session key */
+    if (!server_crypto.derive_session_key(server_pubkey)) {
+        return false;
+    }
+    
+#if CRYPTO_DEBUG
+    std::cerr << "\033[33m║\033[0m \033[1;32m✓ Fresh AES-256 session key established!\033[0m" << std::endl;
+    std::cerr << "\033[33m║\033[0m \033[36mAlgorithm:\033[0m ECDH (P-256) + HKDF + AES-256-GCM" << std::endl;
+    std::cerr << "\033[33m╚══════════════════════════════════════════════════════════╝\033[0m\n" << std::endl;
+#endif
+    
+    return true;
+}
+
+bool ChatClient::perform_key_exchange_as_initiator(int peer_fd, CryptoSession& crypto) {
+    /* Generate keypair */
+    if (!crypto.generate_keypair()) {
+        return false;
+    }
+    
+    /* Get our public key */
+    std::vector<unsigned char> my_pubkey = crypto.get_public_key();
+    if (my_pubkey.empty()) {
+        return false;
+    }
+    
+    /* Send our public key */
+    std::string encoded_pubkey = CryptoUtils::base64_encode(my_pubkey);
+    if (!NetworkUtils::send_line(peer_fd, std::string(KEY_EXCHANGE_PREFIX) + encoded_pubkey)) {
+        return false;
+    }
+    
+    /* Receive peer's public key */
+    std::string response;
+    if (!NetworkUtils::recv_line(peer_fd, response)) {
+        return false;
+    }
+    
+    /* Parse response */
+    if (response.substr(0, strlen(KEY_EXCHANGE_RESPONSE_PREFIX)) != KEY_EXCHANGE_RESPONSE_PREFIX) {
+        return false;
+    }
+    
+    std::string peer_pubkey_encoded = response.substr(strlen(KEY_EXCHANGE_RESPONSE_PREFIX));
+    std::vector<unsigned char> peer_pubkey = CryptoUtils::base64_decode(peer_pubkey_encoded);
+    
+    /* Derive shared session key */
+    return crypto.derive_session_key(peer_pubkey);
+}
+
+bool ChatClient::perform_key_exchange_as_responder(int peer_fd, CryptoSession& crypto) {
+    /* Receive initiator's public key */
+    std::string request;
+    if (!NetworkUtils::recv_line(peer_fd, request)) {
+        return false;
+    }
+    
+    /* Parse request */
+    if (request.substr(0, strlen(KEY_EXCHANGE_PREFIX)) != KEY_EXCHANGE_PREFIX) {
+        return false;
+    }
+    
+    std::string peer_pubkey_encoded = request.substr(strlen(KEY_EXCHANGE_PREFIX));
+    std::vector<unsigned char> peer_pubkey = CryptoUtils::base64_decode(peer_pubkey_encoded);
+    
+    /* Generate our keypair */
+    if (!crypto.generate_keypair()) {
+        return false;
+    }
+    
+    /* Get our public key */
+    std::vector<unsigned char> my_pubkey = crypto.get_public_key();
+    if (my_pubkey.empty()) {
+        return false;
+    }
+    
+    /* Send our public key */
+    std::string encoded_pubkey = CryptoUtils::base64_encode(my_pubkey);
+    if (!NetworkUtils::send_line(peer_fd, std::string(KEY_EXCHANGE_RESPONSE_PREFIX) + encoded_pubkey)) {
+        return false;
+    }
+    
+    /* Derive shared session key */
+    return crypto.derive_session_key(peer_pubkey);
 }
