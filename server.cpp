@@ -421,11 +421,9 @@ void ClientConnection::handle_command(const std::string& command) {
             std::set<std::string> members = chat_rooms[room_name];
             pthread_mutex_unlock(&rooms_mutex);
             
-            // Add message to pending queue for all members (except sender)
+            // Add message to pending queue for all members (including sender)
             pthread_mutex_lock(&pending_mutex);
             for (const auto& member_name : members) {
-                if (member_name == logged_in_name)
-                    continue;  // Don't send to self
                 pending_messages[member_name].push_back({room_name, logged_in_name, msg_content});
             }
             pthread_mutex_unlock(&pending_mutex);

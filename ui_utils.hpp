@@ -109,6 +109,11 @@ namespace UI {
         std::cout << Color::BRIGHT_MAGENTA << "❯ " << Color::RESET;
     }
     
+    // Chat mode prompt (simple arrow, no brackets)
+    inline void print_chat_prompt() {
+        std::cout << Color::BRIGHT_GREEN << "» " << Color::RESET;
+    }
+    
     // Server specific messages
     inline void print_client_connected(const std::string& addr, int port) {
         std::cout << Color::BRIGHT_GREEN << "⬢ New client: " << Color::RESET 

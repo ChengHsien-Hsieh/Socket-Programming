@@ -4,11 +4,12 @@
 #include <pthread.h>
 #include <ctime>
 
-/* Message structure for P2P chat */
+/* Message structure for group chat */
 struct Message {
-    std::string from;
-    std::string content;
-    std::string timestamp;
+    std::string room;       // Room name
+    std::string sender;     // Sender name
+    std::string content;    // Message content
+    std::string timestamp;  // Formatted timestamp
 };
 
 /* Thread-safe message storage */
@@ -26,15 +27,28 @@ public:
         pthread_mutex_destroy(&mutex);
     }
     
-    /* Add a new message with current timestamp */
-    void add(const std::string& from, const std::string& content) {
+    /* Add a new group message with current timestamp */
+    void add(const std::string& room, const std::string& sender, const std::string& content) {
         time_t now = time(nullptr);
         char timestamp[20];
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
         
         pthread_mutex_lock(&mutex);
-        messages.push_back({from, content, timestamp});
+        messages.push_back({room, sender, content, timestamp});
         pthread_mutex_unlock(&mutex);
+    }
+    
+    /* Get messages by room name */
+    std::vector<Message> get_by_room(const std::string& room_name) const {
+        pthread_mutex_lock(&mutex);
+        std::vector<Message> result;
+        for (const auto& msg : messages) {
+            if (msg.room == room_name) {
+                result.push_back(msg);
+            }
+        }
+        pthread_mutex_unlock(&mutex);
+        return result;
     }
     
     /* Get all messages (copies for thread safety) */

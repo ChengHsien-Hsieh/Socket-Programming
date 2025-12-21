@@ -17,7 +17,7 @@ CLIENT_SRC = client.cpp network_utils.cpp
 
 # 標頭檔案
 SERVER_HDR = server.hpp thread_pool.hpp
-CLIENT_HDR = client.hpp network_utils.hpp message_store.hpp p2p_handler.hpp ui_utils.hpp
+CLIENT_HDR = client.hpp network_utils.hpp message_store.hpp ui_utils.hpp
 
 # 預設目標：編譯所有程式
 all: $(SERVER) $(CLIENT)
