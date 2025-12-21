@@ -4,6 +4,7 @@
 #include "ui_utils.hpp"
 #include <string>
 #include <atomic>
+#include <mutex>
 #include <pthread.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -131,7 +132,13 @@ public:
     bool has_socket() const { return listen_fd >= 0; }
 
 private:
-    /* Thread function for accepting connections */
+    /* Arguments for connection worker thread */
+    struct ConnectionArgs {
+        P2PHandler* handler;
+        int fd;
+    };
+    
+    /* Thread function for accepting connections (Concurrent Server) */
     static void* thread_func(void* arg) {
         P2PHandler* handler = static_cast<P2PHandler*>(arg);
         
@@ -146,9 +153,26 @@ private:
                 continue;
             }
             
-            handler->handle_connection(peer_fd);
+            /* Fire-and-forget: spawn a detached thread to handle this connection */
+            pthread_t worker_thread;
+            ConnectionArgs* args = new ConnectionArgs{handler, peer_fd};
+            if (pthread_create(&worker_thread, nullptr, connection_worker, args) == 0) {
+                pthread_detach(worker_thread);  // Let it clean up itself
+            } else {
+                /* Failed to create thread, cleanup and continue */
+                close(peer_fd);
+                delete args;
+            }
         }
         
+        return nullptr;
+    }
+    
+    /* Worker thread function for handling a single connection */
+    static void* connection_worker(void* arg) {
+        ConnectionArgs* args = static_cast<ConnectionArgs*>(arg);
+        args->handler->handle_connection(args->fd);
+        delete args;  // Cleanup allocated memory
         return nullptr;
     }
     
@@ -174,6 +198,14 @@ private:
             content = content.substr(1);
         
         message_store.add(sender, content);
-        UI::print_local_message("New message from " + sender);
+        
+        /* Fix UI conflict: clear current line, print message, restore prompt */
+        {
+            std::lock_guard<std::mutex> lock(UI::get_cout_mutex());
+            std::cout << "\r\033[K";  // Carriage return + clear line
+            UI::print_local_message("New message from " + sender);
+            UI::print_prompt();
+            std::cout << std::flush;
+        }
     }
 };

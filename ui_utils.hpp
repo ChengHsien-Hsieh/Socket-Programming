@@ -4,6 +4,15 @@
 #include <string>
 #include <iostream>
 #include <sstream>
+#include <mutex>
+
+/* Global mutex for thread-safe console output */
+namespace UI {
+    inline std::mutex& get_cout_mutex() {
+        static std::mutex cout_mutex;
+        return cout_mutex;
+    }
+}
 
 /* ANSI Color Codes */
 namespace Color {

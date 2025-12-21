@@ -10,7 +10,7 @@
 int main(int argc, char** argv) {
     std::string server_ip = (argc >= 2) ? argv[1] : LOCAL_HOST;
     int server_port = (argc >= 3) ? std::stoi(argv[2]) : DEFAULT_PORT;
-    
+
     ChatClient client(server_ip, server_port);
 
     UI::print_banner("CHAT CLIENT");
@@ -42,12 +42,10 @@ int main(int argc, char** argv) {
    ChatClient Implementation
    =================================== */
 
-ChatClient::ChatClient(const std::string& server_ip, int server_port)
-    : server_fd(-1), should_continue(true), logged_in_name(""), p2p_handler(message_store) {
-    
+ChatClient::ChatClient(const std::string& server_ip, int server_port): server_fd(-1), should_continue(true), logged_in_name(""), p2p_handler(message_store) {
     server_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server_fd < 0)
-        cleanup_and_exit("socket");
+        ERR_EXIT("socket");
 
     sockaddr_in server_addr{};
     server_addr.sin_family = AF_INET;
@@ -55,7 +53,7 @@ ChatClient::ChatClient(const std::string& server_ip, int server_port)
     server_addr.sin_port = htons(server_port);
 
     if (connect(server_fd, (sockaddr*)&server_addr, sizeof(server_addr)) < 0)
-        cleanup_and_exit("connect");
+        ERR_EXIT("connect");
 
     UI::print_success("Connected to server at " + server_ip + ":" + std::to_string(server_port));
 }
@@ -85,12 +83,10 @@ void ChatClient::handle_command(const std::string& command) {
         iss >> name >> password >> port_str;
         cmd_login(name, password, port_str);
     }
-    else if (cmd_type == "logout") {
+    else if (cmd_type == "logout")
         cmd_logout();
-    }
-    else if (cmd_type == "list") {
+    else if (cmd_type == "list")
         cmd_list();
-    }
     else if (cmd_type == "send") {
         std::string target_name;
         iss >> target_name;
@@ -102,15 +98,12 @@ void ChatClient::handle_command(const std::string& command) {
         
         cmd_send(target_name, message);
     }
-    else if (cmd_type == "messages") {
+    else if (cmd_type == "messages")
         cmd_messages();
-    }
-    else if (cmd_type == "quit") {
+    else if (cmd_type == "quit")
         cmd_quit();
-    }
-    else if (!cmd_type.empty()) {
+    else if (!cmd_type.empty())
         cmd_unknown();
-    }
 }
 
 /* ===================================
@@ -135,7 +128,8 @@ void ChatClient::cmd_register(const std::string& name, const std::string& passwo
     
     if (response_code == SUCCESS) {
         UI::print_success("Register Success!");
-    } else {
+    }
+    else {
         int error_code;
         iss >> error_code;
         print_error_message(error_code);
@@ -190,7 +184,8 @@ void ChatClient::cmd_login(const std::string& name, const std::string& password,
         UI::print_success("Login Success!");
         logged_in_name = name;
         p2p_handler.start();
-    } else {
+    }
+    else {
         int error_code;
         iss >> error_code;
         print_error_message(error_code);
@@ -218,7 +213,8 @@ void ChatClient::cmd_logout() {
         UI::print_success("Logout Success!");
         p2p_handler.stop();
         logged_in_name.clear();
-    } else {
+    }
+    else {
         int error_code;
         iss >> error_code;
         print_error_message(error_code);
@@ -242,7 +238,8 @@ void ChatClient::cmd_list() {
         while (iss >> name)
             output += " " + name;
         UI::print_server_message(output);
-    } else {
+    }
+    else {
         int error_code;
         iss >> error_code;
         print_error_message(error_code);
@@ -276,11 +273,10 @@ void ChatClient::cmd_send(const std::string& target_name, const std::string& mes
     iss >> ip >> port;
 
     /* Send P2P message */
-    if (P2PHandler::send_message(ip, port, logged_in_name, message)) {
+    if (P2PHandler::send_message(ip, port, logged_in_name, message))
         UI::print_success("Message sent to " + target_name);
-    } else {
+    else
         UI::print_error("Failed to send message to " + target_name);
-    }
 }
 
 void ChatClient::cmd_messages() {
@@ -291,9 +287,8 @@ void ChatClient::cmd_messages() {
     
     auto messages = message_store.get_all();
     UI::print_info("=== Received Messages ===");
-    for (const auto& msg : messages) {
+    for (const auto& msg : messages)
         std::cout << "[" << msg.timestamp << "] From " << msg.from << ": " << msg.content << std::endl;
-    }
     UI::print_info("=========================");
 }
 
@@ -356,7 +351,8 @@ std::string ChatClient::get_user_address(const std::string& username) {
         int port;
         iss >> ip >> port;
         return ip + " " + std::to_string(port);
-    } else {
+    }
+    else {
         int error_code;
         iss >> error_code;
         print_error_message(error_code);
@@ -365,14 +361,13 @@ std::string ChatClient::get_user_address(const std::string& username) {
 }
 
 void ChatClient::print_error_message(int error_code) {
-    if (error_code >= 0 && error_code < 8) {
+    if (error_code >= 0 && error_code < 8)
         UI::print_error(ERROR_MESSAGES[error_code]);
-    } else {
+    else
         UI::print_error("Unknown error");
-    }
 }
 
-void ChatClient::cleanup_and_exit(const char* msg) {
+void ChatClient::ERR_EXIT(const char* msg) {
     std::perror(msg);
     if (server_fd >= 0)
         close(server_fd);
