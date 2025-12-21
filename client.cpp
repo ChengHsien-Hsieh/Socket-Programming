@@ -22,6 +22,11 @@ int main(int argc, char** argv) {
     std::cout << Color::DIM << "  list" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  send <username> <message>" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  messages" << Color::RESET << std::endl;
+    std::cout << Color::DIM << "  create_room <room_name>" << Color::RESET << std::endl;
+    std::cout << Color::DIM << "  join_room <room_name>" << Color::RESET << std::endl;
+    std::cout << Color::DIM << "  leave_room <room_name>" << Color::RESET << std::endl;
+    std::cout << Color::DIM << "  list_rooms" << Color::RESET << std::endl;
+    std::cout << Color::DIM << "  group_send <room_name> <message>" << Color::RESET << std::endl;
     std::cout << Color::DIM << "  quit" << Color::RESET << std::endl;
     UI::print_line();
     std::cout << std::endl;
@@ -100,6 +105,34 @@ void ChatClient::handle_command(const std::string& command) {
     }
     else if (cmd_type == "messages")
         cmd_messages();
+    else if (cmd_type == "create_room") {
+        std::string room_name;
+        iss >> room_name;
+        cmd_create_room(room_name);
+    }
+    else if (cmd_type == "join_room") {
+        std::string room_name;
+        iss >> room_name;
+        cmd_join_room(room_name);
+    }
+    else if (cmd_type == "leave_room") {
+        std::string room_name;
+        iss >> room_name;
+        cmd_leave_room(room_name);
+    }
+    else if (cmd_type == "list_rooms")
+        cmd_list_rooms();
+    else if (cmd_type == "group_send") {
+        std::string room_name;
+        iss >> room_name;
+        
+        std::string message;
+        std::getline(iss, message);
+        if (!message.empty() && message[0] == ' ')
+            message = message.substr(1);
+        
+        cmd_group_send(room_name, message);
+    }
     else if (cmd_type == "quit")
         cmd_quit();
     else if (!cmd_type.empty())
@@ -297,6 +330,166 @@ void ChatClient::cmd_quit() {
     should_continue = false;
 }
 
+/* ===================================
+   Group Chat Commands
+   =================================== */
+
+void ChatClient::cmd_create_room(const std::string& room_name) {
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    if (room_name.empty()) {
+        UI::print_error("Usage: create_room <room_name>");
+        return;
+    }
+    
+    send_to_server(std::to_string(CREATE_ROOM) + " " + room_name);
+    
+    std::string response;
+    if (!recv_from_server(response))
+        return;
+    
+    std::istringstream iss(response);
+    int response_code;
+    iss >> response_code;
+    
+    if (response_code == SUCCESS)
+        UI::print_success("Room '" + room_name + "' created successfully!");
+    else {
+        int error_code;
+        iss >> error_code;
+        print_error_message(error_code);
+    }
+}
+
+void ChatClient::cmd_join_room(const std::string& room_name) {
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    if (room_name.empty()) {
+        UI::print_error("Usage: join_room <room_name>");
+        return;
+    }
+    
+    send_to_server(std::to_string(JOIN_ROOM) + " " + room_name);
+    
+    std::string response;
+    if (!recv_from_server(response))
+        return;
+    
+    std::istringstream iss(response);
+    int response_code;
+    iss >> response_code;
+    
+    if (response_code == SUCCESS)
+        UI::print_success("Joined room '" + room_name + "' successfully!");
+    else {
+        int error_code;
+        iss >> error_code;
+        print_error_message(error_code);
+    }
+}
+
+void ChatClient::cmd_leave_room(const std::string& room_name) {
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    if (room_name.empty()) {
+        UI::print_error("Usage: leave_room <room_name>");
+        return;
+    }
+    
+    send_to_server(std::to_string(LEAVE_ROOM) + " " + room_name);
+    
+    std::string response;
+    if (!recv_from_server(response))
+        return;
+    
+    std::istringstream iss(response);
+    int response_code;
+    iss >> response_code;
+    
+    if (response_code == SUCCESS)
+        UI::print_success("Left room '" + room_name + "' successfully!");
+    else {
+        int error_code;
+        iss >> error_code;
+        print_error_message(error_code);
+    }
+}
+
+void ChatClient::cmd_list_rooms() {
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    send_to_server(std::to_string(LIST_ROOMS));
+    
+    std::string response;
+    if (!recv_from_server(response))
+        return;
+    
+    std::istringstream iss(response);
+    int response_code;
+    iss >> response_code;
+    
+    if (response_code == SUCCESS) {
+        std::string room;
+        std::string output = "Available Rooms:";
+        while (iss >> room)
+            output += " " + room;
+        if (output == "Available Rooms:")
+            output += " (none)";
+        UI::print_server_message(output);
+    } else {
+        int error_code;
+        iss >> error_code;
+        print_error_message(error_code);
+    }
+}
+
+void ChatClient::cmd_group_send(const std::string& room_name, const std::string& message) {
+    if (logged_in_name.empty()) {
+        UI::print_error("You must login first");
+        return;
+    }
+    
+    if (room_name.empty()) {
+        UI::print_error("Usage: group_send <room_name> <message>");
+        return;
+    }
+    
+    if (message.empty()) {
+        UI::print_error("Message cannot be empty");
+        return;
+    }
+    
+    send_to_server(std::to_string(GROUP_MSG) + " " + room_name + " " + message);
+    
+    std::string response;
+    if (!recv_from_server(response))
+        return;
+    
+    std::istringstream iss(response);
+    int response_code;
+    iss >> response_code;
+    
+    if (response_code == SUCCESS)
+        UI::print_success("Message sent to room '" + room_name + "'");
+    else {
+        int error_code;
+        iss >> error_code;
+        print_error_message(error_code);
+    }
+}
+
 void ChatClient::cmd_unknown() {
     send_to_server(std::to_string(UNKNOWN));
     
@@ -328,11 +521,39 @@ bool ChatClient::send_to_server(const std::string& message) {
 }
 
 bool ChatClient::recv_from_server(std::string& response) {
-    if (!NetworkUtils::recv_line(server_fd, response)) {
-        should_continue = false;
-        return false;
+    // Keep receiving until we get a non-GROUP_NOTIFY response
+    while (true) {
+        if (!NetworkUtils::recv_line(server_fd, response)) {
+            should_continue = false;
+            return false;
+        }
+        
+        // Check if this is a GROUP_NOTIFY message
+        if (response.substr(0, 12) == "GROUP_NOTIFY") {
+            // Format: "GROUP_NOTIFY room_name sender content"
+            std::istringstream iss(response);
+            std::string notify_tag, room_name, sender;
+            iss >> notify_tag >> room_name >> sender;
+            
+            std::string content;
+            std::getline(iss, content);
+            if (!content.empty() && content[0] == ' ')
+                content = content.substr(1);
+            
+            // Store in message queue with room info
+            std::string from = "[" + room_name + "] " + sender;
+            message_store.add(from, content);
+            
+            // Display notification
+            UI::print_local_message("Group message from " + sender + " in " + room_name);
+            
+            // Continue reading for more GROUP_NOTIFY or the actual response
+            continue;
+        }
+        
+        // This is the actual response (not GROUP_NOTIFY)
+        return true;
     }
-    return true;
 }
 
 std::string ChatClient::get_user_address(const std::string& username) {
@@ -361,7 +582,7 @@ std::string ChatClient::get_user_address(const std::string& username) {
 }
 
 void ChatClient::print_error_message(int error_code) {
-    if (error_code >= 0 && error_code < 8)
+    if (error_code >= 0 && error_code < 11)
         UI::print_error(ERROR_MESSAGES[error_code]);
     else
         UI::print_error("Unknown error");

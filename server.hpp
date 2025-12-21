@@ -1,5 +1,8 @@
 #pragma once
 #include <string>
+#include <set>
+#include <vector>
+#include <unordered_map>
 #include <pthread.h>
 #include <iostream>
 #include <atomic>
@@ -9,9 +12,9 @@
 #define DEFAULT_PORT 8888
 #define NUM_THREADS 10
 #define BACKLOG 10
-enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, GET_ADDR, UNKNOWN};
+enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, GET_ADDR, UNKNOWN, CREATE_ROOM, JOIN_ROOM, LEAVE_ROOM, LIST_ROOMS, GROUP_MSG};
 enum ResponseCode {SUCCESS, ERROR};
-enum ErrorCode {USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, MUST_LOGOUT_FIRST, UNKNOWN_COMMAND};
+enum ErrorCode {USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, MUST_LOGOUT_FIRST, UNKNOWN_COMMAND, ROOM_EXISTS, ROOM_NOT_FOUND, NOT_IN_ROOM};
 
 struct User {
     std::string ip;
@@ -19,6 +22,21 @@ struct User {
     std::string password;
     bool online = false;
 };
+
+/* Group message structure for pending delivery */
+struct GroupMessage {
+    std::string room_name;
+    std::string sender;
+    std::string content;
+};
+
+/* Global variables declarations */
+extern std::unordered_map<std::string, User> users;
+extern pthread_mutex_t users_mutex;
+extern std::unordered_map<std::string, std::set<std::string>> chat_rooms;  // RoomName -> {User1, User2...}
+extern pthread_mutex_t rooms_mutex;
+extern std::unordered_map<std::string, std::vector<GroupMessage>> pending_messages;  // Username -> pending group messages
+extern pthread_mutex_t pending_mutex;
 
 class Server {
 private:
@@ -39,6 +57,7 @@ private:
     std::string ip;
     std::string logged_in_name = "";
     void ERR_EXIT(const char *msg);
+    void send_pending_messages();  // Send pending group messages before response
 
 public:
     explicit ClientConnection(int client_fd);

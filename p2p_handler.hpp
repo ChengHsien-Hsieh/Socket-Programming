@@ -58,7 +58,7 @@ public:
             NetworkUtils::ERR_EXIT("listen");
         
         listen_port = port;
-        UI::print_local_message("P2P listening socket created on port " + std::to_string(port));
+        // UI::print_local_message("P2P listening socket created on port " + std::to_string(port));
         return true;
     }
     
@@ -66,7 +66,7 @@ public:
     void close_socket() {
         if (listen_fd < 0)
             return;
-        UI::print_local_message("Closing P2P listening socket on port " + std::to_string(listen_port));
+        // UI::print_local_message("Closing P2P listening socket on port " + std::to_string(listen_port));
         close(listen_fd);
         listen_fd = -1;
         listen_port = 0;
@@ -199,7 +199,7 @@ private:
         
         message_store.add(sender, content);
         
-        /* Fix UI conflict: clear current line, print message, restore prompt */
+        /* UI: clear current line, print message, restore prompt */
         {
             std::lock_guard<std::mutex> lock(UI::get_cout_mutex());
             std::cout << "\r\033[K";  // Carriage return + clear line

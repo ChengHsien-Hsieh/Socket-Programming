@@ -15,12 +15,17 @@
 #include <vector>
 #include <algorithm>
 #include <unordered_map>
+#include <set>
 #include <atomic>
 
 /* Global variables */
 std::atomic<bool> receive_signal(false);
 std::unordered_map<std::string, User> users;
 pthread_mutex_t users_mutex = PTHREAD_MUTEX_INITIALIZER;
+std::unordered_map<std::string, std::set<std::string>> chat_rooms;
+pthread_mutex_t rooms_mutex = PTHREAD_MUTEX_INITIALIZER;
+std::unordered_map<std::string, std::vector<GroupMessage>> pending_messages;
+pthread_mutex_t pending_mutex = PTHREAD_MUTEX_INITIALIZER;
 std::vector<int> conn_fds;
 pthread_mutex_t conn_fds_mutex = PTHREAD_MUTEX_INITIALIZER;
 
@@ -192,9 +197,22 @@ void ClientConnection::handle_command(const std::string& command) {
     std::string command_type;
     iss >> command_type;
     
+    /* Handle empty or invalid command */
+    if (command_type.empty()) {
+        return;  // Ignore empty commands
+    }
+    
+    int cmd;
+    try {
+        cmd = std::stoi(command_type);
+    } catch (const std::exception& e) {
+        send_line(std::to_string(ERROR) + " " + std::to_string(UNKNOWN_COMMAND));
+        return;
+    }
+    
     std::string response = "";
     pthread_mutex_lock(&users_mutex);
-    switch (std::stoi(command_type)) {
+    switch (cmd) {
         case REGISTER: {
             std::string name, password;
             iss >> name >> password;
@@ -272,11 +290,183 @@ void ClientConnection::handle_command(const std::string& command) {
                 response = std::to_string(SUCCESS) + " " + users[target_name].ip + " " + std::to_string(users[target_name].port);
             break;
         }
+        case CREATE_ROOM: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            std::string room_name;
+            iss >> room_name;
+            if (room_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(UNKNOWN_COMMAND);
+                break;
+            }
+            pthread_mutex_unlock(&users_mutex);  // Release users_mutex before acquiring rooms_mutex
+            
+            pthread_mutex_lock(&rooms_mutex);
+            if (chat_rooms.find(room_name) != chat_rooms.end()) {
+                response = std::to_string(ERROR) + " " + std::to_string(ROOM_EXISTS);
+            } else {
+                chat_rooms[room_name].insert(logged_in_name);  // Creator auto-joins
+                response = std::to_string(SUCCESS);
+                UI::print_server_status("Room created: " + room_name + " by " + logged_in_name);
+            }
+            pthread_mutex_unlock(&rooms_mutex);
+            send_pending_messages();
+            send_line(response);
+            return;  // Early return since we already unlocked and sent
+        }
+        case JOIN_ROOM: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            std::string room_name;
+            iss >> room_name;
+            pthread_mutex_unlock(&users_mutex);
+            
+            pthread_mutex_lock(&rooms_mutex);
+            if (chat_rooms.find(room_name) == chat_rooms.end()) {
+                response = std::to_string(ERROR) + " " + std::to_string(ROOM_NOT_FOUND);
+            } else {
+                chat_rooms[room_name].insert(logged_in_name);
+                response = std::to_string(SUCCESS);
+                UI::print_server_status(logged_in_name + " joined room: " + room_name);
+            }
+            pthread_mutex_unlock(&rooms_mutex);
+            send_pending_messages();
+            send_line(response);
+            return;
+        }
+        case LEAVE_ROOM: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            std::string room_name;
+            iss >> room_name;
+            pthread_mutex_unlock(&users_mutex);
+            
+            pthread_mutex_lock(&rooms_mutex);
+            if (chat_rooms.find(room_name) == chat_rooms.end()) {
+                response = std::to_string(ERROR) + " " + std::to_string(ROOM_NOT_FOUND);
+            } else if (chat_rooms[room_name].count(logged_in_name) == 0) {
+                response = std::to_string(ERROR) + " " + std::to_string(NOT_IN_ROOM);
+            } else {
+                chat_rooms[room_name].erase(logged_in_name);
+                // Delete room if empty
+                if (chat_rooms[room_name].empty()) {
+                    chat_rooms.erase(room_name);
+                    UI::print_server_status("Room deleted (empty): " + room_name);
+                }
+                response = std::to_string(SUCCESS);
+                UI::print_server_status(logged_in_name + " left room: " + room_name);
+            }
+            pthread_mutex_unlock(&rooms_mutex);
+            send_pending_messages();
+            send_line(response);
+            return;
+        }
+        case LIST_ROOMS: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            pthread_mutex_unlock(&users_mutex);
+            
+            pthread_mutex_lock(&rooms_mutex);
+            response = std::to_string(SUCCESS);
+            for (const auto& pair : chat_rooms) {
+                response += " " + pair.first + "(" + std::to_string(pair.second.size()) + ")";
+            }
+            pthread_mutex_unlock(&rooms_mutex);
+            send_pending_messages();
+            send_line(response);
+            return;
+        }
+        case GROUP_MSG: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            std::string room_name;
+            iss >> room_name;
+            std::string msg_content;
+            std::getline(iss, msg_content);
+            if (!msg_content.empty() && msg_content[0] == ' ')
+                msg_content = msg_content.substr(1);
+            
+            pthread_mutex_unlock(&users_mutex);  // Release before acquiring rooms_mutex
+            
+            pthread_mutex_lock(&rooms_mutex);
+            bool room_exists = (chat_rooms.find(room_name) != chat_rooms.end());
+            bool is_member = room_exists && (chat_rooms[room_name].count(logged_in_name) > 0);
+            
+            if (!room_exists) {
+                response = std::to_string(ERROR) + " " + std::to_string(ROOM_NOT_FOUND);
+                pthread_mutex_unlock(&rooms_mutex);
+                send_pending_messages();
+                send_line(response);
+                return;
+            }
+            if (!is_member) {
+                response = std::to_string(ERROR) + " " + std::to_string(NOT_IN_ROOM);
+                pthread_mutex_unlock(&rooms_mutex);
+                send_pending_messages();
+                send_line(response);
+                return;
+            }
+            
+            // Copy members list before releasing rooms_mutex
+            std::set<std::string> members = chat_rooms[room_name];
+            pthread_mutex_unlock(&rooms_mutex);
+            
+            // Add message to pending queue for all members (except sender)
+            pthread_mutex_lock(&pending_mutex);
+            for (const auto& member_name : members) {
+                if (member_name == logged_in_name)
+                    continue;  // Don't send to self
+                pending_messages[member_name].push_back({room_name, logged_in_name, msg_content});
+            }
+            pthread_mutex_unlock(&pending_mutex);
+            
+            UI::print_server_status("Group message queued for " + std::to_string(members.size() - 1) + " member(s) in room: " + room_name);
+            
+            response = std::to_string(SUCCESS);
+            send_pending_messages();
+            send_line(response);
+            return;
+        }
         default:
             response = std::to_string(ERROR) + " " + std::to_string(UNKNOWN_COMMAND);
     }
     pthread_mutex_unlock(&users_mutex);
+    send_pending_messages();
     send_line(response);
+}
+
+void ClientConnection::send_pending_messages() {
+    if (logged_in_name.empty())
+        return;
+    
+    pthread_mutex_lock(&pending_mutex);
+    if (pending_messages.find(logged_in_name) == pending_messages.end() || 
+        pending_messages[logged_in_name].empty()) {
+        pthread_mutex_unlock(&pending_mutex);
+        return;
+    }
+    
+    // Move messages out and clear the queue
+    std::vector<GroupMessage> messages = std::move(pending_messages[logged_in_name]);
+    pending_messages[logged_in_name].clear();
+    pthread_mutex_unlock(&pending_mutex);
+    
+    // Send each pending message with GROUP_NOTIFY prefix
+    for (const auto& msg : messages) {
+        // Format: "GROUP_NOTIFY room_name sender content"
+        std::string notify = "GROUP_NOTIFY " + msg.room_name + " " + msg.sender + " " + msg.content;
+        send_line(notify);
+    }
 }
 
 void ClientConnection::send_line(const std::string& s) {
