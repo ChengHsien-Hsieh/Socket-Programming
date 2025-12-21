@@ -1,4 +1,3 @@
-// thread_pool.cpp
 #include "thread_pool.hpp"
 #include "ui_utils.hpp"
 #include <unistd.h>

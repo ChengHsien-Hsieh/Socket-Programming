@@ -1,32 +1,65 @@
 #pragma once
+#include "network_utils.hpp"
+#include "message_store.hpp"
+#include "p2p_handler.hpp"
 #include <string>
-#define EXIT_SUCCESS 0
-#define EXIT_FAILURE 1
+
 #define LOCAL_HOST "127.0.0.1"
 #define DEFAULT_PORT 8888
-enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, UNKNOWN};
-enum ResponseCode {SUCCESS, ERROR};
-enum ErrorCode {USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, MUST_LOGOUT_FIRST, UNKNOWN_COMMAND};
 
-/* ServerConnection class for RAII socket management */
-class ServerConnection {
+/* Protocol definitions */
+enum CommandType { REGISTER, LOGIN, LOGOUT, LIST, GET_ADDR, UNKNOWN };
+enum ResponseCode { SUCCESS, ERROR };
+enum ErrorCode { 
+    USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, 
+    ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, 
+    MUST_LOGOUT_FIRST, UNKNOWN_COMMAND 
+};
+
+/* Main chat client class - coordinates all components */
+class ChatClient {
 private:
+    /* Server connection */
     int server_fd;
-    std::string my_name;
     bool should_continue;
-    int listen_fd;  // P2P listening socket
-    int listen_port;  // Port number for P2P
+    std::string logged_in_name;
+    
+    /* Components */
+    MessageStore message_store;
+    P2PHandler p2p_handler;
+    
+    /* Error messages */
+    static constexpr const char* ERROR_MESSAGES[] = {
+        "User already exists", "User not found", "Wrong password",
+        "User already online", "User not online", "You must login first",
+        "You must logout first", "Unknown command"
+    };
 
 public:
-    ServerConnection(const std::string& server_ip, int server_port);
-    ~ServerConnection();
-    void handle_command(const std::string& command);
-    void send_line(const std::string& message);
-    bool recv_line(std::string& out);
-    bool continued() const { return should_continue; }
+    ChatClient(const std::string& server_ip, int server_port);
+    ~ChatClient();
     
+    /* Main command processing */
+    void handle_command(const std::string& command);
+    bool should_run() const { return should_continue; }
+
 private:
-    bool create_listening_socket(int port);  // Create and bind listening socket
-    void close_listening_socket();           // Close listening socket
-    void ERR_EXIT(const char *msg);          // Error exit with cleanup
+    /* Command handlers */
+    void cmd_register(const std::string& name, const std::string& password);
+    void cmd_login(const std::string& name, const std::string& password, const std::string& port_str);
+    void cmd_logout();
+    void cmd_list();
+    void cmd_send(const std::string& target_name, const std::string& message);
+    void cmd_messages();
+    void cmd_quit();
+    void cmd_unknown();
+    
+    /* Helper methods */
+    bool send_to_server(const std::string& message);
+    bool recv_from_server(std::string& response);
+    std::string get_user_address(const std::string& username);
+    void print_error_message(int error_code);
+    
+    /* Cleanup helper */
+    void cleanup_and_exit(const char* msg);
 };

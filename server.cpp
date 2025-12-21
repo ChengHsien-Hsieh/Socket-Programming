@@ -1,3 +1,6 @@
+#include "server.hpp"
+#include "thread_pool.hpp"
+#include "ui_utils.hpp"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -13,9 +16,6 @@
 #include <algorithm>
 #include <unordered_map>
 #include <atomic>
-#include "server.hpp"
-#include "thread_pool.hpp"
-#include "ui_utils.hpp"
 
 /* Global variables */
 std::atomic<bool> receive_signal(false);
@@ -108,7 +108,7 @@ Server::Server(unsigned short p) : port(p) {
         ERR_EXIT("bind");
 
     /* Start listening (backlog = 10, meaning at most 10 waiting connections) */
-    if (listen(listen_fd, 10) < 0)
+    if (listen(listen_fd, BACKLOG) < 0)
         ERR_EXIT("listen");
 
     UI::print_success("Server initialized and listening on " + std::string(LOCAL_HOST) + ":" + std::to_string(port));
@@ -116,12 +116,6 @@ Server::Server(unsigned short p) : port(p) {
 
 Server::~Server() {
     close_server();
-}
-
-void Server::ERR_EXIT(const char *msg) {
-    std::perror(msg);
-    close_server();
-    exit(EXIT_FAILURE);
 }
 
 int Server::accept_conn() {
@@ -167,11 +161,23 @@ void Server::close_server() {
     pthread_mutex_destroy(&conn_fds_mutex);
 }
 
+void Server::ERR_EXIT(const char *msg) {
+    std::perror(msg);
+    close_server();
+    exit(EXIT_FAILURE);
+}
+
 /* ===================================
    ClientConnection Implementation
    =================================== */
 
 ClientConnection::ClientConnection(int client_fd) : fd(client_fd) {
+    /* Get client IP address using getpeername */
+    sockaddr_in peer_addr{};
+    socklen_t addr_len = sizeof(peer_addr);
+    if (getpeername(fd, (sockaddr*)&peer_addr, &addr_len) == 0)
+        ip = inet_ntoa(peer_addr.sin_addr);
+    
     pthread_mutex_lock(&conn_fds_mutex);
     conn_fds.push_back(fd);
     pthread_mutex_unlock(&conn_fds_mutex);
@@ -179,12 +185,6 @@ ClientConnection::ClientConnection(int client_fd) : fd(client_fd) {
 
 ClientConnection::~ClientConnection() {
     disconnect();
-}
-
-void ClientConnection::ERR_EXIT(const char *msg) {
-    std::perror(msg);
-    disconnect();
-    pthread_exit(nullptr);
 }
 
 void ClientConnection::handle_command(const std::string& command) {
@@ -203,9 +203,7 @@ void ClientConnection::handle_command(const std::string& command) {
             else if (users.find(name) != users.end())
                 response = std::to_string(ERROR) + " " + std::to_string(USER_EXISTS);
             else {
-                User new_user;
-                new_user.password = password;
-                users[name] = new_user;
+                users[name].password = password;
                 response = std::to_string(SUCCESS);
             }
             break;
@@ -224,6 +222,7 @@ void ClientConnection::handle_command(const std::string& command) {
                 response = std::to_string(ERROR) + " " + std::to_string(ALREADY_ONLINE);
             else {
                 users[name].online = true;
+                users[name].ip = ip;
                 users[name].port = port;
                 logged_in_name = name;
                 response = std::to_string(SUCCESS);
@@ -239,6 +238,7 @@ void ClientConnection::handle_command(const std::string& command) {
                 response = std::to_string(ERROR) + " " + std::to_string(NOT_ONLINE);
             else {
                 users[name].online = false;
+                users[name].ip.clear();
                 users[name].port = 0;
                 logged_in_name.clear();
                 response = std::to_string(SUCCESS);
@@ -253,8 +253,23 @@ void ClientConnection::handle_command(const std::string& command) {
             response = std::to_string(SUCCESS);
             for (const auto& pair : users) {
                 if (pair.second.online)
-                    response += " " + pair.first + " " + std::to_string(pair.second.port);
+                    response += " " + pair.first;
             }
+            break;
+        }
+        case GET_ADDR: {
+            if (logged_in_name.empty()) {
+                response = std::to_string(ERROR) + " " + std::to_string(MUST_LOGIN_FIRST);
+                break;
+            }
+            std::string target_name;
+            iss >> target_name;
+            if (users.find(target_name) == users.end())
+                response = std::to_string(ERROR) + " " + std::to_string(USER_NOT_FOUND);
+            else if (!users[target_name].online)
+                response = std::to_string(ERROR) + " " + std::to_string(NOT_ONLINE);
+            else
+                response = std::to_string(SUCCESS) + " " + users[target_name].ip + " " + std::to_string(users[target_name].port);
             break;
         }
         default:
@@ -284,7 +299,6 @@ void ClientConnection::send_line(const std::string& s) {
                     ERR_EXIT("send");
             }
         }
-        
         total_sent += sent;
     }
 }
@@ -310,7 +324,7 @@ bool ClientConnection::recv_line(std::string& out) {
         }
         else if (n == 0)
             return false;
-        
+
         if (c == '\n')
             return true;
         out += c;
@@ -326,9 +340,16 @@ void ClientConnection::disconnect() {
         pthread_mutex_lock(&users_mutex);
         if (users.find(logged_in_name) != users.end()) {
             users[logged_in_name].online = false;
+            users[logged_in_name].ip.clear();
             users[logged_in_name].port = 0;
         }
         pthread_mutex_unlock(&users_mutex);
     }
     close(fd);
+}
+
+void ClientConnection::ERR_EXIT(const char *msg) {
+    std::perror(msg);
+    disconnect();
+    pthread_exit(nullptr);
 }

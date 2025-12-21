@@ -8,13 +8,15 @@
 #define LOCAL_HOST "127.0.0.1"
 #define DEFAULT_PORT 8888
 #define NUM_THREADS 10
-enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, UNKNOWN};
+#define BACKLOG 10
+enum CommandType {REGISTER, LOGIN, LOGOUT, LIST, GET_ADDR, UNKNOWN};
 enum ResponseCode {SUCCESS, ERROR};
 enum ErrorCode {USER_EXISTS, USER_NOT_FOUND, WRONG_PASSWORD, ALREADY_ONLINE, NOT_ONLINE, MUST_LOGIN_FIRST, MUST_LOGOUT_FIRST, UNKNOWN_COMMAND};
 
 struct User {
-    std::string password;
+    std::string ip;
     unsigned short port = 0;
+    std::string password;
     bool online = false;
 };
 
@@ -34,6 +36,7 @@ public:
 class ClientConnection {
 private:
     int fd;
+    std::string ip;
     std::string logged_in_name = "";
     void ERR_EXIT(const char *msg);
 
